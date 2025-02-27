@@ -48,22 +48,44 @@ namespace MyApiProject.Controllers
             // Procesar otros filtros (excluyendo los de fecha si ya se procesaron)
             foreach (var filter in request.Filtros)
             {
-                if (fechaRangeProcessed && filter.Key == "FechaEmision") continue; // Saltar fechas ya procesadas
 
+                string operatorClause = filter.Operator?.ToLower() switch
+                {
+                    "like" => "LIKE",
+                    "=" => "=",
+                    ">=" => ">=",
+                    "<=" => "<=",
+                    ">" => ">",
+                    "<" => "<",
+                    "<>" => "<>",
+                    _ => "LIKE"
+                };
+                if (fechaRangeProcessed && filter.Key == "FechaEmision") continue;
+
+                if (!string.IsNullOrWhiteSpace(filter.Value) && filter.Key == "Codigo")
+                {
+                    // Manejar filtro Codigo con subquery
+                    var columnName = filter.Key;
+
+                    // Generar nombre de parámetro único
+                    if (!parameterCounters.ContainsKey(columnName))
+                        parameterCounters[columnName] = 0;
+                    else
+                        parameterCounters[columnName]++;
+
+                    var uniqueParameterName = $"@{columnName.Replace(".", "_")}_{parameterCounters[columnName]}";
+                    whereClauses.Add($"Articulo IN (SELECT Articulo FROM [LOCAL_TC032391E].[dbo].[Temp_ComprasReport] WHERE Codigo {operatorClause} {uniqueParameterName})");
+
+                    object paramValue = operatorClause == "LIKE"
+                       ? $"%{filter.Value}%"
+                       : filter.Value;
+                    //Console.Write(paramValue);
+                    parameters.Add(new SqlParameter(uniqueParameterName, paramValue));
+                }
+                else
                 if (!string.IsNullOrWhiteSpace(filter.Value))
                 {
                     var columnName = filter.Key;
-                    string operatorClause = filter.Operator?.ToLower() switch
-                    {
-                        "like" => "LIKE",
-                        "=" => "=",
-                        ">=" => ">=",
-                        "<=" => "<=",
-                        ">" => ">",
-                        "<" => "<",
-                        "<>" => "<>",
-                        _ => "LIKE"
-                    };
 
                     // Generar nombres de parámetros únicos para otros campos
                     if (!parameterCounters.ContainsKey(columnName))
@@ -121,7 +143,7 @@ namespace MyApiProject.Controllers
                         {(string.IsNullOrEmpty(sumaQuery) ? "" : $" ROW_NUMBER() OVER(ORDER BY {sumaQuery} DESC) AS ID,")}
                         {(string.IsNullOrEmpty(sumaQuery) ? "" : $"{sumaQuery} ,")}
                         SUM(Cantidad) as Cantidad,
-                        SUM([CostoTotal]) as Costo
+                        SUM(CostoTotal) as Costo
                     {baseQuery} 
                     {whereQuery}
                         {(string.IsNullOrEmpty(sumaQuery) ? "" : $"GROUP BY {sumaQuery}")}
@@ -135,7 +157,7 @@ namespace MyApiProject.Controllers
                 {baseQuery} {whereQuery}
                 ORDER BY ID
                 OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
-            Console.Write(paginatedQuery);
+            //Console.Write(paginatedQuery);
             try
             {
                 await using var connection = await OpenConnectionAsync();
