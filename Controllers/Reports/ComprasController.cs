@@ -134,7 +134,7 @@ namespace MyApiProject.Controllers
 
             // Resto del código sin cambios (countQuery, paginatedQuery)
             var countQuery = sum ? $@"
-                SELECT COUNT(DISTINCT [Nombre]) AS TotalRegistros {baseQuery} {whereQuery}
+                SELECT COUNT(DISTINCT Nombre) AS TotalRegistros {baseQuery} {whereQuery}
             " : $@"
                 SELECT COUNT(*) AS TotalRegistros {baseQuery} {whereQuery}";
 
