@@ -1,135 +1,104 @@
-
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Text;
-public class Startup
+
+var builder = WebApplication.CreateBuilder(args);
+var configuration = builder.Configuration;
+
+// Configuración de CORS optimizada
+var allowedCorsOrigins = configuration.GetSection("AllowedCorsOrigins").Get<string[]>() ?? Array.Empty<string>();
+
+builder.Services.AddCors(options =>
 {
-    private readonly IConfiguration _configuration;
-
-    public Startup(IConfiguration configuration)
+    options.AddPolicy("AllowedCorsOrigins", policy =>
     {
-        _configuration = configuration;
-    }
-    public void ConfigureServices(IServiceCollection services)
+        policy.WithOrigins(allowedCorsOrigins)
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
+// Configuración de autenticación JWT optimizada
+var jwtSettings = configuration.GetRequiredSection("JwtSettings");
+var key = Encoding.UTF8.GetBytes(jwtSettings["Key"] ?? throw new InvalidOperationException("JWT Key is missing"));
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
     {
-
-        var allowedCorsOrigins = _configuration.GetSection("AllowedCorsOrigins").Get<string[]>();
-
-        // Definir la política de CORS desde configuración
-        services.AddCors(options =>
+        options.TokenValidationParameters = new TokenValidationParameters
         {
-            options.AddPolicy("AllowedCorsOrigins",
-                policy =>
-                {
-                    policy.WithOrigins(allowedCorsOrigins)  // Cargar orígenes desde appsettings.json
-                          .AllowAnyHeader()
-                          .AllowAnyMethod();
-                });
-        });
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = jwtSettings["Issuer"],
+            ValidAudience = jwtSettings["Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(key)
+        };
+        options.SaveToken = true;
+    });
 
-        services.AddAuthentication(options =>
-            {
-                options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-                options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-            })
-            .AddJwtBearer(options =>
-            {
-                options.TokenValidationParameters = new TokenValidationParameters
-                {
-                    ValidateIssuer = true,
-                    ValidateAudience = true,
-                    ValidateLifetime = true,
-                    ValidateIssuerSigningKey = true,
-                    ValidIssuer = _configuration["JwtSettings:Issuer"],/* matrizmercadoliz.dyndns.org:5000 !cambiar en appsettings.json */
-                    ValidAudience = _configuration["JwtSettings:Audience"],
-                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["JwtSettings:Key"])) // Cambia por tu clave secreta
-                };
-            });
-
-        services.AddControllers()
-            .AddJsonOptions(options =>
-            {
-                options.JsonSerializerOptions.MaxDepth = int.MaxValue; // Sin límite
-            })
-            .AddNewtonsoftJson(options =>
-            {
-                options.SerializerSettings.MaxDepth = null; // Sin límite de profundidad
-                options.SerializerSettings.Error = (sender, args) =>
-                {
-                    // Manejo de errores (opcional)
-                    args.ErrorContext.Handled = true;
-                };
-            });
-        // Registrar los controladores, servicios y otros componentes
-        services.AddHttpClient();
-        services.AddEndpointsApiExplorer();
-
-        // Registrar AuthUtils y TokensUtils como servicios separados
-        services.AddScoped<AuthUtils>();
-        services.AddScoped<TokensUtils>();
-        services.AddSwaggerGen(c =>
-        {
-            c.SwaggerDoc("v1", new OpenApiInfo { Title = "My API", Version = "v1" });
-            c.OperationFilter<FileUploadOperationFilter>();
-
-            // Configuración de seguridad para JWT
-            c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
-            {
-                Name = "Authorization",
-                Type = SecuritySchemeType.ApiKey,
-                Scheme = "Bearer",
-                BearerFormat = "JWT",
-                In = ParameterLocation.Header,
-                Description = "Ingrese el token JWT en este formato: Bearer {token}"
-            });
-
-            c.AddSecurityRequirement(new OpenApiSecurityRequirement
-            {
-                {
-                    new OpenApiSecurityScheme
-                    {
-                        Reference = new OpenApiReference
-                        {
-                            Type = ReferenceType.SecurityScheme,
-                            Id = "Bearer"
-                        }
-                    },
-                    new string[] {}
-                }
-            });
-        });
-
-    }
-
-    // Método para configurar el pipeline de la aplicación
-    public void Configure(IApplicationBuilder app/* , IWebHostEnvironment env */)
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
     {
-        /* 
-        if (env.IsDevelopment())
+        options.JsonSerializerOptions.PropertyNamingPolicy = null; // Mantiene nombres originales de las propiedades
+        options.JsonSerializerOptions.MaxDepth = 64; // Un valor más razonable para evitar problemas de rendimiento
+    })
+    .AddNewtonsoftJson(options =>
+    {
+        options.SerializerSettings.MaxDepth = 64; // Limita la profundidad para evitar sobrecarga
+        options.SerializerSettings.Error = (sender, args) => args.ErrorContext.Handled = true;
+    });
+
+// Registro de servicios
+builder.Services.AddHttpClient();
+builder.Services.AddScoped<AuthUtils>();
+builder.Services.AddScoped<TokensUtils>();
+
+// Configuración de Swagger con seguridad JWT optimizada
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "My API", Version = "v1" });
+    c.OperationFilter<FileUploadOperationFilter>();
+
+    var securityScheme = new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Ingrese el token JWT en este formato: Bearer {token}",
+        Reference = new OpenApiReference
         {
-            app.UseDeveloperExceptionPage();
+            Type = ReferenceType.SecurityScheme,
+            Id = "Bearer"
         }
-        */
+    };
 
-        app.UseSwagger();
-        app.UseSwaggerUI(c =>
-        {
-            c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
-            c.RoutePrefix = string.Empty; // Acceso a Swagger en la raíz
-        });
+    c.AddSecurityDefinition("Bearer", securityScheme);
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        { securityScheme, Array.Empty<string>() }
+    });
+});
 
-        app.UseCors("AllowedCorsOrigins");
+var app = builder.Build();
 
-        app.UseRouting();
+// Configuración del pipeline
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
+    c.RoutePrefix = string.Empty; // Acceso a Swagger en la raíz
+});
 
-        //app.UseHttpsRedirection();
-        app.UseAuthentication();  // Si usas autenticación
-        app.UseAuthorization();
+app.UseCors("AllowedCorsOrigins");
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
 
-        app.UseEndpoints(endpoints =>
-        {
-            endpoints.MapControllers();
-        });
-    }
-}
+app.MapControllers();
+app.Run();
