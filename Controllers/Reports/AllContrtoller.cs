@@ -23,7 +23,7 @@ namespace MyApiProject.Controllers
             pageSize = Math.Max(pageSize, 10);
             int offset = (page - 1) * pageSize;
 
-            const string baseQuery = "FROM [LOCAL_TC032391E].[dbo].[Temp_MovimientosReport] WITH (NOLOCK)";
+            const string baseQuery = "FROM [LOCAL_TC032391E].[dbo].[Temp_MovimientosReport]";
 
             var whereClauses = new List<string>();
             var sumaClauses = new List<string>();

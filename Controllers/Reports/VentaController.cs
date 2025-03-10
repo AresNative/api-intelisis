@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using System.Data;
 
 namespace MyApiProject.Controllers
 {
@@ -9,192 +10,105 @@ namespace MyApiProject.Controllers
         public async Task<IActionResult> ObtenerVentas(
             [FromBody] ReporteriaRequest request,
             [FromQuery] bool sum = false,
+            [FromQuery] bool distinct = false,
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 10)
         {
-            if (page <= 0) page = 1;
-            if (pageSize <= 0) pageSize = 10;
+            if (sum && distinct)
+            {
+                return BadRequest("Los parámetros sum y distinct no pueden ser verdaderos al mismo tiempo.");
+            }
 
+            page = Math.Max(page, 1);
+            pageSize = Math.Max(pageSize, 10);
             int offset = (page - 1) * pageSize;
 
-            var baseQuery = @"
-            FROM [LOCAL_TC032391E].[dbo].[Temp_VentasReport]";
+            const string baseQuery = "FROM [LOCAL_TC032391E].[dbo].[Temp_VentasReport]";
 
             var whereClauses = new List<string>();
             var sumaClauses = new List<string>();
             var parameters = new List<SqlParameter>();
             var parameterCounters = new Dictionary<string, int>();
 
-            // Procesar filtros
-            var fechaEmisionParams = request.Filtros.Where(f => f.Key == "FechaEmision").ToList();
-            bool fechaRangeProcessed = false;
-
-            // Manejo de rango de fechas si hay exactamente dos filtros
-            if (fechaEmisionParams.Count == 2)
-            {
-                var minFecha = fechaEmisionParams.FirstOrDefault(f => f.Operator == ">=");
-                var maxFecha = fechaEmisionParams.FirstOrDefault(f => f.Operator == "<=");
-
-                if (minFecha != null && maxFecha != null)
-                {
-                    whereClauses.Add("FechaEmision BETWEEN @FechaEmisionMin AND @FechaEmisionMax");
-                    parameters.Add(new SqlParameter("@FechaEmisionMin", DateTime.Parse(minFecha.Value)));
-                    parameters.Add(new SqlParameter("@FechaEmisionMax", DateTime.Parse(maxFecha.Value)));
-                    fechaRangeProcessed = true;
-                }
-            }
-
-            // Procesar otros filtros (excluyendo los de fecha si ya se procesaron)
-            foreach (var filter in request.Filtros)
-            {
-
-                string operatorClause = filter.Operator?.ToLower() switch
-                {
-                    "like" => "LIKE",
-                    "=" => "=",
-                    ">=" => ">=",
-                    "<=" => "<=",
-                    ">" => ">",
-                    "<" => "<",
-                    "<>" => "<>",
-                    _ => "LIKE"
-                };
-                if (fechaRangeProcessed && filter.Key == "FechaEmision") continue;
-
-                if (!string.IsNullOrWhiteSpace(filter.Value) && filter.Key == "Codigo")
-                {
-                    // Manejar filtro Codigo con subquery
-                    var columnName = filter.Key;
-
-                    // Generar nombre de parámetro único
-                    if (!parameterCounters.ContainsKey(columnName))
-                        parameterCounters[columnName] = 0;
-                    else
-                        parameterCounters[columnName]++;
-
-                    var uniqueParameterName = $"@{columnName.Replace(".", "_")}_{parameterCounters[columnName]}";
-                    whereClauses.Add($"Articulo IN (SELECT Articulo FROM [LOCAL_TC032391E].[dbo].[Temp_VentasReport] WHERE Codigo {operatorClause} {uniqueParameterName})");
-
-                    object paramValue = operatorClause == "LIKE"
-                       ? $"%{filter.Value}%"
-                       : filter.Value;
-                    //Console.Write(paramValue);
-                    parameters.Add(new SqlParameter(uniqueParameterName, paramValue));
-                }
-                else
-                if (!string.IsNullOrWhiteSpace(filter.Value))
-                {
-                    var columnName = filter.Key;
-
-                    // Generar nombres de parámetros únicos para otros campos
-                    if (!parameterCounters.ContainsKey(columnName))
-                        parameterCounters[columnName] = 0;
-                    else
-                        parameterCounters[columnName]++;
-
-                    var uniqueParameterName = $"@{columnName.Replace(".", "_")}_{parameterCounters[columnName]}";
-                    whereClauses.Add($"{columnName} {operatorClause} {uniqueParameterName}");
-
-                    object paramValue = operatorClause == "LIKE"
-                        ? $"%{filter.Value}%"
-                        : filter.Value;
-
-                    parameters.Add(new SqlParameter(uniqueParameterName, paramValue));
-                }
-            }
-
-            // Procesar sumas (sin cambios)
+            BuildFilters(request, whereClauses, parameters, parameterCounters, "Temp_VentasReport");
             foreach (var suma in request.Sumas)
             {
                 if (!string.IsNullOrWhiteSpace(suma.Key))
-                {
                     sumaClauses.Add(suma.Key);
-                }
             }
 
-            // Agrupar condiciones (sin cambios)
-            var groupedConditions = whereClauses
-                .Select(c => new
-                {
-                    Key = c.Split(' ')[0],
-                    Condition = c
-                })
-                .GroupBy(x => x.Key)
-                .Select(g => g.Count() > 1
-                    ? $"({string.Join(" OR ", g.Select(x => x.Condition))})"
-                    : g.First().Condition)
-                .ToList();
+            var condicionesAgrupadas = AgruparCondiciones(whereClauses);
+            string whereQuery = condicionesAgrupadas.Any() ? $"WHERE {string.Join(" AND ", condicionesAgrupadas)}" : "";
+            string sumaQuery = sumaClauses.Any() ? string.Join(", ", sumaClauses) : "";
 
-            var whereQuery = groupedConditions.Any()
-                ? $"WHERE {string.Join(" AND ", groupedConditions)}"
-                : "";
+            string dataQuery;
+            string countQuery = $"SELECT COUNT(*) AS TotalRegistros {baseQuery} {whereQuery}";
 
-            var sumaQuery = sumaClauses.Any() ? $"{string.Join(", ", sumaClauses)}" : "";
-
-            // Resto del código sin cambios (countQuery, paginatedQuery)
-            var countQuery = sum ? $@"
-                SELECT COUNT(DISTINCT Nombre) AS TotalRegistros {baseQuery} {whereQuery}
-            " : $@"
-                SELECT COUNT(*) AS TotalRegistros {baseQuery} {whereQuery}";
-
-            var paginatedQuery = sum ? $@" 
-                    SELECT
-                        {(string.IsNullOrEmpty(sumaQuery) ? "" : $" ROW_NUMBER() OVER(ORDER BY {sumaQuery} DESC) AS ID,")}
-                        {(string.IsNullOrEmpty(sumaQuery) ? "" : $"{sumaQuery} ,")}
-                        SUM(Cantidad) as Cantidad,
-                        SUM(ImporteTotal) as Importe
-                    {baseQuery} 
-                    {whereQuery}
-                        {(string.IsNullOrEmpty(sumaQuery) ? "" : $"GROUP BY {sumaQuery}")}
+            if (sum)
+            {
+                dataQuery = $@"
+                    SELECT {(string.IsNullOrEmpty(sumaQuery) ? "" : $"{sumaQuery},")}
+                           SUM(Cantidad) AS Cantidad, SUM(ImporteTotal) AS Importe
+                    {baseQuery} {whereQuery}
+                    {(string.IsNullOrEmpty(sumaQuery) ? "" : $"GROUP BY {sumaQuery}")}
                     ORDER BY Importe DESC
-                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
-                " : $@"
-                SELECT
-                    {(string.IsNullOrEmpty(sumaQuery) ? @"
-                        Nombre,Almacen,Unidad,Cantidad,ImporteTotal,FechaEmision
-                    " : $"{sumaQuery}")}
-                {baseQuery} {whereQuery}
-                ORDER BY ID
-                OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
-            //Console.Write(paginatedQuery);
+                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+            }
+            else if (distinct)
+            {
+                dataQuery = $@"
+                    SELECT DISTINCT {(string.IsNullOrEmpty(sumaQuery) ? "*" : sumaQuery)}
+                    {baseQuery} {whereQuery}
+                    ORDER BY {(string.IsNullOrEmpty(sumaQuery) ? "FechaEmision" : sumaQuery)} DESC
+                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+            }
+            else
+            {
+                dataQuery = $@"
+                    SELECT {(string.IsNullOrEmpty(sumaQuery) ? "*" : sumaQuery)}
+                    {baseQuery} {whereQuery}
+                    ORDER BY FechaEmision DESC
+                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+            }
+
+            parameters.Add(new SqlParameter("@Offset", offset));
+            parameters.Add(new SqlParameter("@PageSize", pageSize));
+
             try
             {
                 await using var connection = await OpenConnectionAsync();
 
-                // Total records (sin cambios)
-                var countCommandParameters = parameters
-                    .Select(p => new SqlParameter(p.ParameterName, p.Value))
-                    .ToList();
-
-                await using var countCommand = new SqlCommand(countQuery, connection);
-                countCommand.Parameters.AddRange(countCommandParameters.ToArray());
-                var totalRecords = (int)await countCommand.ExecuteScalarAsync();
-
-                // Paginated data (sin cambios)
-                var paginatedParameters = parameters
-                    .Select(p => new SqlParameter(p.ParameterName, p.Value))
-                    .ToList();
-
-                paginatedParameters.AddRange(new[]
+                // Ejecutar la consulta de conteo primero
+                int totalRecords = 0;
+                await using (var countCommand = new SqlCommand(countQuery, connection))
                 {
-                    new SqlParameter("@Offset", offset),
-                    new SqlParameter("@PageSize", pageSize)
-                });
-
-                await using var command = new SqlCommand(paginatedQuery, connection);
-                command.Parameters.AddRange(paginatedParameters.ToArray());
+                    foreach (var param in parameters)
+                    {
+                        countCommand.Parameters.Add(new SqlParameter(param.ParameterName, param.Value));
+                    }
+                    totalRecords = Convert.ToInt32(await countCommand.ExecuteScalarAsync());
+                }
 
                 var results = new List<Dictionary<string, object>>();
-
-                await using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                await using (var dataCommand = new SqlCommand(dataQuery, connection))
                 {
-                    var row = new Dictionary<string, object>();
-                    for (int i = 0; i < reader.FieldCount; i++)
+                    foreach (var param in parameters)
                     {
-                        row[reader.GetName(i)] = reader.GetValue(i);
+                        dataCommand.Parameters.Add(new SqlParameter(param.ParameterName, param.Value));
                     }
-                    results.Add(row);
+
+                    await using var reader = await dataCommand.ExecuteReaderAsync(CommandBehavior.SequentialAccess);
+                    while (await reader.ReadAsync())
+                    {
+                        var row = new Dictionary<string, object>(reader.FieldCount);
+                        object[] values = new object[reader.FieldCount];
+                        reader.GetValues(values);
+                        for (int i = 0; i < reader.FieldCount; i++)
+                        {
+                            row[reader.GetName(i)] = values[i];
+                        }
+                        results.Add(row);
+                    }
                 }
 
                 return Ok(new
@@ -208,8 +122,10 @@ namespace MyApiProject.Controllers
             }
             catch (Exception ex)
             {
-                return HandleException(ex, paginatedQuery);
+                return HandleException(ex, dataQuery);
             }
+
+
         }
     }
 }
