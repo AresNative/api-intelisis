@@ -56,6 +56,9 @@ builder.Services.AddHttpClient();
 builder.Services.AddScoped<AuthUtils>();
 builder.Services.AddScoped<TokensUtils>();
 
+// Registrar IMemoryCache
+builder.Services.AddMemoryCache(); // Esto es necesario para resolver IMemoryCache
+
 // Configuración de Swagger con seguridad JWT optimizada
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>

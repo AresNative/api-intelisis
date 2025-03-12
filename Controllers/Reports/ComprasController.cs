@@ -1,12 +1,18 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Caching.Memory;
 using System.Data;
 
 namespace MyApiProject.Controllers
 {
     public partial class Reporteria : BaseController
     {
-        public Reporteria(IConfiguration configuration) : base(configuration) { }
+        private readonly IMemoryCache _memoryCache;
+
+        public Reporteria(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration)
+        {
+            _memoryCache = memoryCache;
+        }
 
         [HttpPost("api/v1/reporteria/compras")]
         public async Task<IActionResult> ObtenerCompras(

@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
-using System.Threading;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace MyApiProject.Controllers
 {

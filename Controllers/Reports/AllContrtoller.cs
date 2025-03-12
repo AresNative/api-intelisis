@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Caching.Memory;
 using System.Data;
 
 namespace MyApiProject.Controllers
@@ -20,7 +21,7 @@ namespace MyApiProject.Controllers
             }
 
             page = Math.Max(page, 1);
-            pageSize = Math.Max(pageSize, 10);
+            pageSize = Math.Max(pageSize, 5);
             int offset = (page - 1) * pageSize;
 
             const string baseQuery = "FROM [LOCAL_TC032391E].[dbo].[Temp_MovimientosReport]";
@@ -97,6 +98,12 @@ namespace MyApiProject.Controllers
 
             try
             {
+                var cacheKey = $"{combinedQuery}-{offset}-{pageSize}";
+                if (_memoryCache.TryGetValue(cacheKey, out var cachedResult))
+                {
+                    return Ok(cachedResult);
+                }
+
                 await using var connection = await OpenConnectionAsync();
                 await using var command = new SqlCommand(combinedQuery, connection)
                 {
@@ -127,14 +134,18 @@ namespace MyApiProject.Controllers
                     results.Add(row);
                 }
 
-                return Ok(new
+                var response = new
                 {
                     TotalRecords = totalRecords,
                     TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
                     Page = page,
                     PageSize = pageSize,
                     Data = results
-                });
+                };
+
+                _memoryCache.Set(cacheKey, response, TimeSpan.FromMinutes(10)); // Cache por 10 minutos
+
+                return Ok(response);
             }
             catch (Exception ex)
             {
@@ -240,6 +251,5 @@ namespace MyApiProject.Controllers
                 }
             }
         }
-
     }
 }

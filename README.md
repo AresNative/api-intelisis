@@ -71,6 +71,12 @@ Instalar dependencias
   dotnet build
 ```
 
+Instalar dependencias personalizadas
+
+```bash
+  dotnet add package 'tu dependencia o libreria'
+```
+
 Iniciar api
 
 ```bash
