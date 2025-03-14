@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Caching.Memory;
 using System.Data;
+using MyApiProject.Models;
 
 namespace MyApiProject.Controllers
 {
@@ -28,19 +29,43 @@ namespace MyApiProject.Controllers
 
             var whereClauses = new List<string>();
             var sumaClauses = new List<string>();
+            var orderClauses = new List<string>();
             var parameters = new List<SqlParameter>();
             var parameterCounters = new Dictionary<string, int>();
 
             BuildFilters(request, whereClauses, parameters, parameterCounters);
+            // Procesar SumaParams (sumas simples)
             foreach (var suma in request.Sumas)
             {
                 if (!string.IsNullOrWhiteSpace(suma.Key))
-                    sumaClauses.Add(suma.Key);
+                {
+                    sumaClauses.Add($"SUM({suma.Key})");
+                }
             }
 
+            // Procesar SumaAsParams (sumas con alias)
+            foreach (var sumaAs in request.sumaAs)
+            {
+                if (!string.IsNullOrWhiteSpace(sumaAs.Key))
+                {
+                    string alias = string.IsNullOrWhiteSpace(sumaAs.Alias) ? sumaAs.Key : sumaAs.Alias;
+                    sumaClauses.Add($"SUM({sumaAs.Key}) AS {alias}");
+                }
+            }
+
+            // Procesar OrderParams (órdenes)
+            foreach (var order in request.Order)
+            {
+                if (!string.IsNullOrWhiteSpace(order.Key))
+                {
+                    string direction = order.Direction?.ToUpper() == "DESC" ? "DESC" : "ASC";
+                    orderClauses.Add($"{order.Key} {direction}");
+                }
+            }
             var condicionesAgrupadas = AgruparCondiciones(whereClauses);
             string whereQuery = condicionesAgrupadas.Any() ? $"WHERE {string.Join(" AND ", condicionesAgrupadas)}" : "";
             string sumaQuery = sumaClauses.Any() ? string.Join(", ", sumaClauses) : "";
+            string orderQuery = orderClauses.Any() ? $"ORDER BY {string.Join(", ", orderClauses)}" : "";
 
             // Construcción de consultas según sum y distinct
             string dataQuery;
@@ -49,30 +74,30 @@ namespace MyApiProject.Controllers
             if (sum)
             {
                 dataQuery = $@"
-                    WITH SumData AS (
-                        SELECT 
-                            {(string.IsNullOrEmpty(sumaQuery) ? "" : $"{sumaQuery},")}
-                            SUM(Cantidad) AS Cantidad,
-                            SUM(ImporteTotal) AS Importe,
-                            SUM(CostoTotal) AS Costo
-                        {baseQuery}
-                        {whereQuery}
-                        {(string.IsNullOrEmpty(sumaQuery) ? "" : $"GROUP BY {sumaQuery}")}
-                    )
-                    SELECT * FROM SumData
-                    ORDER BY Importe DESC
-                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+            WITH SumData AS (
+                SELECT 
+                    {(string.IsNullOrEmpty(sumaQuery) ? "" : $"{sumaQuery},")}
+                    SUM(Cantidad) AS Cantidad,
+                    SUM(ImporteTotal) AS Importe,
+                    SUM(CostoTotal) AS Costo
+                {baseQuery}
+                {whereQuery}
+                {(string.IsNullOrEmpty(sumaQuery) ? "" : $"GROUP BY {sumaQuery}")}
+            )
+            SELECT * FROM SumData
+            {orderQuery}
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
 
                 countQuery = $"SELECT COUNT(1) AS TotalRegistros FROM (SELECT DISTINCT Nombre {baseQuery} {whereQuery}) AS Subquery";
             }
             else if (distinct)
             {
                 dataQuery = $@"
-                    SELECT DISTINCT {(string.IsNullOrEmpty(sumaQuery) ? "*" : sumaQuery)}
-                    {baseQuery}
-                    {whereQuery}
-                    ORDER BY {(string.IsNullOrEmpty(sumaQuery) ? "FechaEmision" : sumaQuery)} DESC
-                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+            SELECT DISTINCT {(string.IsNullOrEmpty(sumaQuery) ? "*" : sumaQuery)}
+            {baseQuery}
+            {whereQuery}
+            {orderQuery}
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
 
                 countQuery = string.IsNullOrEmpty(sumaQuery)
                     ? $"SELECT COUNT(*) AS TotalRegistros FROM (SELECT DISTINCT * {baseQuery} {whereQuery}) AS Subquery"
@@ -81,12 +106,12 @@ namespace MyApiProject.Controllers
             else
             {
                 dataQuery = $@"
-                    SELECT 
-                        {(string.IsNullOrEmpty(sumaQuery) ? "*" : sumaQuery)}
-                    {baseQuery}
-                    {whereQuery}
-                    ORDER BY FechaEmision DESC
-                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+            SELECT 
+                {(string.IsNullOrEmpty(sumaQuery) ? "*" : sumaQuery)}
+            {baseQuery}
+            {whereQuery}
+            {(string.IsNullOrEmpty(orderQuery) ? "ORDER BY FechaEmision DESC" : orderQuery)}
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
 
                 countQuery = $"SELECT COUNT(*) AS TotalRegistros {baseQuery} {whereQuery}";
             }
@@ -98,7 +123,8 @@ namespace MyApiProject.Controllers
 
             try
             {
-                var cacheKey = $"{combinedQuery}-{offset}-{pageSize}";
+
+                var cacheKey = $"{combinedQuery}-{offset}-{pageSize}-{whereQuery}-{sumaQuery}";
                 if (_memoryCache.TryGetValue(cacheKey, out var cachedResult))
                 {
                     return Ok(cachedResult);

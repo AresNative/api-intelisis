@@ -10,6 +10,8 @@ namespace MyApiProject.Controllers
         {
             public List<BusquedaParams> Filtros { get; set; } = new();
             public List<SumaParams> Sumas { get; set; } = new();
+            public List<SumaAsParams> sumaAs { get; set; } = new();
+            public List<OrderParams> Order { get; set; } = new();
         }
 
         [HttpPost("api/v1/reporteria/mermas")]
