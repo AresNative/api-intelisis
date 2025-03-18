@@ -9,8 +9,8 @@ namespace MyApiProject.Controllers
         public class ReporteriaRequest
         {
             public List<BusquedaParams> Filtros { get; set; } = new();
-            public List<SumaParams> Sumas { get; set; } = new();
-            public List<SumaAsParams> sumaAs { get; set; } = new();
+            public List<SumaParams> Selects { get; set; } = new();
+            /* public List<SumaAsParams> sumaAs { get; set; } = new(); */
             public List<OrderParams> Order { get; set; } = new();
         }
 
@@ -78,8 +78,8 @@ namespace MyApiProject.Controllers
                 }
             }
 
-            // Procesar sumas
-            foreach (var suma in request.Sumas)
+            // Procesar selects
+            foreach (var suma in request.Selects)
             {
                 if (!string.IsNullOrWhiteSpace(suma.Key))
                 {

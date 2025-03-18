@@ -39,7 +39,7 @@ namespace MyApiProject.Controllers
             var parameterCounters = new Dictionary<string, int>();
 
             BuildFilters(request, whereClauses, parameters, parameterCounters, "Temp_ComprasReport");
-            foreach (var suma in request.Sumas)
+            foreach (var suma in request.Selects)
             {
                 if (!string.IsNullOrWhiteSpace(suma.Key))
                     sumaClauses.Add(suma.Key);
