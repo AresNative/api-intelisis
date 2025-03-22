@@ -32,7 +32,6 @@ namespace MyApiProject.Controllers
 
             // Consultas SQL con paginación
             string queryPrecios = @"
-                USE TC032841E;
                 WITH Paginado AS (
                     SELECT 
                         CB.Codigo, 
@@ -59,7 +58,6 @@ namespace MyApiProject.Controllers
             ";
 
             string queryOfertas = @"
-                USE TC032841E;
                 SELECT 
                     OfertaD.Articulo,
                     OfertaD.Precio,
