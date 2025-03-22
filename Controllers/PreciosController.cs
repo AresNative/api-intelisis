@@ -13,8 +13,6 @@ namespace MyApiProject.Controllers
         {
             _connectionString = configuration.GetConnectionString("DefaultConnection");
         }
-
-        // GET: api/precios
         [HttpGet]
         public async Task<IActionResult> GetPrecios([FromQuery] string? filtro, [FromQuery] int page = 1, [FromQuery] int pageSize = 10)
         {
@@ -34,7 +32,7 @@ namespace MyApiProject.Controllers
 
             // Consultas SQL con paginación
             string queryPrecios = @"
-                USE SVRPANADERIA;
+                USE TC032841E;
                 WITH Paginado AS (
                     SELECT 
                         CB.Codigo, 
@@ -61,7 +59,7 @@ namespace MyApiProject.Controllers
             ";
 
             string queryOfertas = @"
-                USE SVRPANADERIA;
+                USE TC032841E;
                 SELECT 
                     OfertaD.Articulo,
                     OfertaD.Precio,
