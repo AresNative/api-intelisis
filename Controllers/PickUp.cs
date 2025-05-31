@@ -5,11 +5,11 @@ using System.Data;
 
 namespace MyApiProject.Controllers
 {
-    public partial class Reporteria : BaseController
+    public partial class PickUp : BaseController
     {
         private readonly IMemoryCache _memoryCache;
 
-        public Reporteria(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration)
+        public PickUp(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration)
         {
             _memoryCache = memoryCache;
         }
