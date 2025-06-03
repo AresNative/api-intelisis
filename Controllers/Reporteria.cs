@@ -3,6 +3,9 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Caching.Memory;
 using MyApiProject.Models;
 using System.Data;
+using Newtonsoft.Json;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace MyApiProject.Controllers
 {
@@ -88,7 +91,19 @@ namespace MyApiProject.Controllers
 
             if (request == null)
                 return BadRequest("La solicitud no puede ser nula.");
-
+            string cacheKey = null;
+            try
+            {
+                cacheKey = BuildCacheKey(reportType, sum, distinct, page, pageSize, request);
+                if (_memoryCache.TryGetValue(cacheKey, out ReportResponse cachedResponse))
+                {
+                    return Ok(cachedResponse);
+                }
+            }
+            catch
+            {
+                cacheKey = null; // Fallback: proceder sin caché si hay error
+            }
             // Configuración de paginación
             page = Math.Max(page, 1);
             pageSize = Math.Max(pageSize, 10);
@@ -114,24 +129,55 @@ namespace MyApiProject.Controllers
             try
             {
                 var (totalRecords, results) = await ExecuteQueryAsync(
-                    $"{countQuery}; {dataQuery}",
-                    parameters,
-                    offset,
-                    pageSize
-                );
+                   $"{countQuery}; {dataQuery}",
+                   parameters,
+                   offset,
+                   pageSize
+               );
 
-                return Ok(new ReportResponse
+                var response = new ReportResponse
                 {
                     TotalRecords = totalRecords,
                     TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
                     Page = page,
                     PageSize = pageSize,
                     Data = results
-                });
+                };
+
+                // Almacenar en caché si la clave es válida
+                if (cacheKey != null)
+                {
+                    var cacheOptions = new MemoryCacheEntryOptions()
+                        .SetSlidingExpiration(TimeSpan.FromMinutes(1));
+
+                    _memoryCache.Set(cacheKey, response, cacheOptions);
+                }
+
+                return Ok(response);
             }
             catch (Exception ex)
             {
                 return HandleException(ex, $"{countQuery}; {dataQuery}");
+            }
+        }
+        private string BuildCacheKey(
+                   ReportType reportType,
+                   bool sum,
+                   bool distinct,
+                   int page,
+                   int pageSize,
+                   ReporteriaRequest request)
+        {
+            var requestJson = JsonConvert.SerializeObject(request);
+            var rawKey = $"{reportType}_{sum}_{distinct}_{page}_{pageSize}_{requestJson}";
+
+            using (var sha1 = SHA1.Create())
+            {
+                byte[] hash = sha1.ComputeHash(Encoding.UTF8.GetBytes(rawKey));
+                var sb = new StringBuilder(40);
+                foreach (byte b in hash)
+                    sb.Append(b.ToString("x2"));
+                return sb.ToString();
             }
         }
 
@@ -406,7 +452,51 @@ namespace MyApiProject.Controllers
                     AND INV.Estatus IN ('CONCLUIDO')
             ) AS VentasReport";
 
-        private string GetComprasBaseQuery() => "FROM [TC032841E].[dbo].[Temp_ComprasReport]";
+        private string GetComprasBaseQuery() => @"FROM (
+            SELECT
+                INVD.Codigo, 
+                C.Nombre AS Proveedor,
+                ART.Fabricante,
+                'COMPRA' AS Tipo,
+                INV.Mov AS Movimiento,
+                INVD.Articulo,
+                ART.Descripcion1 AS Nombre,
+                ART.Categoria,
+                ART.Grupo,
+                ART.Linea,
+                ART.Familia,
+                INVD.Unidad,
+                INVD.Factor,
+                (INVD.CantidadInventario / INVD.Cantidad) AS Equivalencia,
+                INVD.Cantidad,
+                INVD.CantidadInventario,
+                INVD.Costo AS CostoUnitario,
+                (INVD.Costo * INVD.Cantidad) AS CostoTotal,
+                CASE 
+                    WHEN INVD.Almacen = 'ALMVGPE' THEN 'LIZ'
+                    WHEN INVD.Almacen = 'ALMPALM' THEN 'PALMAS'
+                    WHEN INVD.Almacen = 'ALMTESTE' THEN 'TESTERAZO'
+                    WHEN INVD.Almacen = 'ALMMAYO' THEN 'MAYOREO'
+                    ELSE INVD.Almacen
+                END AS Almacen,
+                INVD.Impuesto1 AS IVA,
+                INVD.Impuesto2 AS IEPS,
+                FORMAT((INVD.DescuentoImporte / NULLIF(INVD.COSTO * INVD.Cantidad, 0)) * 100, 'N2') AS PorcentajeDescuento,
+                FechaEmision,
+                FORMAT(FechaEmision, 'MMMM', 'es-ES') AS Mes,
+                YEAR(FechaEmision) AS Año
+            FROM 
+                [TC032841E].dbo.COMPRAD InvD 
+            LEFT JOIN 
+                [TC032841E].dbo.ART ON INVD.Articulo = ART.Articulo
+            LEFT JOIN 
+                [TC032841E].dbo.COMPRA INV ON INVD.ID = INV.ID
+            LEFT JOIN 
+                [TC032841E].dbo.PROV C ON INV.Proveedor = C.Proveedor
+            WHERE 
+                INV.Mov = 'ENTRADA COMPRA'
+                AND INV.Estatus = 'CONCLUIDO'
+            ) AS ComprasReport";
 
         private string GetMermasBaseQuery() => @"
             FROM (
