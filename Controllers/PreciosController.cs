@@ -10,7 +10,7 @@ namespace MyApiProject.Controllers
     {
         private const int MaxPageSize = 100;
 
-        public PreciosController(IConfiguration configuration) : base(configuration) { }
+        public PreciosController(IConfiguration configuration) : base(configuration, null) { }
 
         [HttpGet]
         public async Task<IActionResult> GetPrecios(

@@ -1,28 +1,27 @@
+// Program.cs
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Text;
+using MyApiProject.Services;  // <-- para IAIService
 
 var builder = WebApplication.CreateBuilder(args);
 var configuration = builder.Configuration;
 
-// Configuración de CORS optimizada
+// CORS
 var allowedCorsOrigins = configuration.GetSection("AllowedCorsOrigins").Get<string[]>() ?? Array.Empty<string>();
-
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowedCorsOrigins", policy =>
-    {
         policy.WithOrigins(allowedCorsOrigins)
               .AllowAnyHeader()
-              .AllowAnyMethod();
-    });
+              .AllowAnyMethod());
 });
 
-// Configuración de autenticación JWT optimizada
+// JWT Authentication
 var jwtSettings = configuration.GetRequiredSection("JwtSettings");
-var key = Encoding.UTF8.GetBytes(jwtSettings["Key"] ?? throw new InvalidOperationException("JWT Key is missing"));
-
+var key = Encoding.UTF8.GetBytes(jwtSettings["Key"]
+             ?? throw new InvalidOperationException("JWT Key is missing"));
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -39,27 +38,30 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         options.SaveToken = true;
     });
 
+// Controllers + JSON settings
 builder.Services.AddControllers()
-    .AddJsonOptions(options =>
+    .AddJsonOptions(o =>
     {
-        options.JsonSerializerOptions.PropertyNamingPolicy = null; // Mantiene nombres originales de las propiedades
-        options.JsonSerializerOptions.MaxDepth = 64; // Un valor más razonable para evitar problemas de rendimiento
+        o.JsonSerializerOptions.PropertyNamingPolicy = null;
+        o.JsonSerializerOptions.MaxDepth = 64;
     })
-    .AddNewtonsoftJson(options =>
+    .AddNewtonsoftJson(o =>
     {
-        options.SerializerSettings.MaxDepth = 64; // Limita la profundidad para evitar sobrecarga
-        options.SerializerSettings.Error = (sender, args) => args.ErrorContext.Handled = true;
+        o.SerializerSettings.MaxDepth = 64;
+        o.SerializerSettings.Error = (sender, args) => args.ErrorContext.Handled = true;
     });
 
-// Registro de servicios
-builder.Services.AddHttpClient();
+// Caching
+builder.Services.AddMemoryCache();
+
+// HttpClient + IA service
+builder.Services.AddHttpClient<IAIService, FreeHuggingFaceAIService>();
+
+// Utilidades y otros servicios
 builder.Services.AddScoped<AuthUtils>();
 builder.Services.AddScoped<TokensUtils>();
 
-// Registrar IMemoryCache
-builder.Services.AddMemoryCache(); // Esto es necesario para resolver IMemoryCache
-
-// Configuración de Swagger con seguridad JWT optimizada
+// Swagger + JWT in UI
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -80,22 +82,20 @@ builder.Services.AddSwaggerGen(c =>
             Id = "Bearer"
         }
     };
-
     c.AddSecurityDefinition("Bearer", securityScheme);
-    c.AddSecurityRequirement(new OpenApiSecurityRequirement
-    {
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement {
         { securityScheme, Array.Empty<string>() }
     });
 });
 
 var app = builder.Build();
 
-// Configuración del pipeline
+// Middleware pipeline
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
     c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
-    c.RoutePrefix = string.Empty; // Acceso a Swagger en la raíz
+    c.RoutePrefix = string.Empty;
 });
 
 app.UseCors("AllowedCorsOrigins");

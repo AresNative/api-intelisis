@@ -1,3 +1,4 @@
+// Controllers/BaseController.cs
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Caching.Memory;
@@ -7,10 +8,13 @@ namespace MyApiProject.Controllers
     public abstract class BaseController : ControllerBase
     {
         private readonly string _connectionString;
+        protected readonly IMemoryCache _cache;
 
-        public BaseController(IConfiguration configuration)
+        public BaseController(IConfiguration configuration, IMemoryCache cache)
         {
-            _connectionString = configuration.GetConnectionString("DefaultConnection");
+            _connectionString = configuration.GetConnectionString("DefaultConnection")
+                                ?? throw new InvalidOperationException("Cadena de conexión 'DefaultConnection' no encontrada");
+            _cache = cache;
         }
 
         protected async Task<SqlConnection> OpenConnectionAsync()
@@ -22,13 +26,9 @@ namespace MyApiProject.Controllers
 
         protected IActionResult HandleException(Exception ex, string? query = null)
         {
-            // Manejar cancelación de solicitud
             if (ex is OperationCanceledException || ex is TaskCanceledException)
-            {
                 return StatusCode(499, new { Message = "Solicitud cancelada por el cliente" });
-            }
 
-            // Manejo de errores general
             var sanitizedMessage = ex.Message.Replace("\r", "").Replace("\n", " ");
             var sanitizedQuery = query?.Replace("\r", "").Replace("\n", " ");
 
@@ -42,9 +42,8 @@ namespace MyApiProject.Controllers
         protected IActionResult HandleException(Exception ex, int statusCode)
         {
             if (ex is OperationCanceledException || ex is TaskCanceledException)
-            {
                 return StatusCode(499, "Solicitud cancelada por el cliente");
-            }
+
             return StatusCode(statusCode, new { Message = $"Error: {ex.Message}" });
         }
     }

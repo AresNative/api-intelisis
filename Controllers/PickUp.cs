@@ -9,7 +9,7 @@ namespace MyApiProject.Controllers
     {
         private readonly IMemoryCache _memoryCache;
 
-        public PickUp(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration)
+        public PickUp(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration, memoryCache)
         {
             _memoryCache = memoryCache;
         }

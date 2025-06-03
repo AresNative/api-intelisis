@@ -8,7 +8,7 @@ namespace MyApiProject.Controllers
     public partial class Oferta : BaseController
     {
         private readonly IMemoryCache _memoryCache;
-        public Oferta(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration)
+        public Oferta(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration, memoryCache)
         {
             _memoryCache = memoryCache;
         }

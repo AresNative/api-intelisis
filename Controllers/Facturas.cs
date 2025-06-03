@@ -8,7 +8,7 @@ namespace MyApiProject.Controllers
     [ApiController]
     public class ConsultaCFDIController : BaseController
     {
-        public ConsultaCFDIController(IConfiguration configuration) : base(configuration)
+        public ConsultaCFDIController(IConfiguration configuration) : base(configuration, null)
         {
         }
 

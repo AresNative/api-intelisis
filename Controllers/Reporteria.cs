@@ -10,7 +10,7 @@ namespace MyApiProject.Controllers
     {
         private readonly IMemoryCache _memoryCache;
 
-        public Reporteria(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration)
+        public Reporteria(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration, memoryCache)
         {
             _memoryCache = memoryCache;
         }

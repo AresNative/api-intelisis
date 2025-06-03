@@ -11,7 +11,7 @@ namespace MyApiProject.Controllers
     {
         private readonly string _backupPath = Path.Combine(Path.GetTempPath(), "TableBackups");
 
-        public BackupController(IConfiguration configuration) : base(configuration)
+        public BackupController(IConfiguration configuration) : base(configuration, null)
         {
         }
 
