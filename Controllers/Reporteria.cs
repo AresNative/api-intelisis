@@ -406,7 +406,7 @@ namespace MyApiProject.Controllers
                     AND INV.Estatus IN ('CONCLUIDO')
             ) AS VentasReport";
 
-        private string GetComprasBaseQuery() => "FROM [LOCAL_TC032391E].[dbo].[Temp_ComprasReport]";
+        private string GetComprasBaseQuery() => "FROM [TC032841E].[dbo].[Temp_ComprasReport]";
 
         private string GetMermasBaseQuery() => @"
             FROM (
