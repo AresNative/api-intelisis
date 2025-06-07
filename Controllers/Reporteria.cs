@@ -303,7 +303,6 @@ namespace MyApiProject.Controllers
             if (sum)
             {
                 var groupByClause = string.IsNullOrEmpty(selectColumns) ? "" : $"GROUP BY {selectColumns}";
-                var distinctCount = string.IsNullOrEmpty(selectColumns) ? "ID" : GetDistinctColumns(selectColumns);
 
                 var dataQuery = $@"
                     WITH SumData AS (
@@ -318,10 +317,28 @@ namespace MyApiProject.Controllers
                     ORDER BY {orderByField}
                     OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
 
-                var countQuery = $"SELECT COUNT(DISTINCT {distinctCount}) AS TotalRegistros {baseQuery} {whereQuery}";
+                string countQuery;
+                if (string.IsNullOrEmpty(selectColumns))
+                {
+                    // Sin agrupación: siempre 1 registro de total
+                    countQuery = "SELECT 1 AS TotalRegistros";
+                }
+                else
+                {
+                    // Con agrupación: contar grupos generados
+                    countQuery = $@"
+                        SELECT COUNT(*) AS TotalRegistros
+                        FROM (
+                            SELECT {selectColumns}
+                            {baseQuery}
+                            {whereQuery}
+                            GROUP BY {selectColumns}
+                        ) AS GroupedData";
+                }
 
                 return (dataQuery, countQuery);
             }
+
 
             if (distinct)
             {
@@ -530,11 +547,6 @@ namespace MyApiProject.Controllers
                     inv.Concepto LIKE '%MERMAS%'
                     AND inv.Estatus = 'CONCLUIDO'
             ) AS MermasReport";
-
-        private string GetDistinctColumns(string columns)
-        {
-            return string.IsNullOrEmpty(columns) ? "ID" : columns.Split(',').First().Trim();
-        }
         #endregion
     }
 
