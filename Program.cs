@@ -65,7 +65,7 @@ builder.Services.AddScoped<TokensUtils>();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "My API", Version = "v1" });
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Api Intelisis | Mercados-Liz by AresDev", Version = "v1" });
     c.OperationFilter<FileUploadOperationFilter>();
 
     var securityScheme = new OpenApiSecurityScheme
@@ -94,7 +94,7 @@ var app = builder.Build();
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
-    c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Mercados-Liz by AresDev");
     c.RoutePrefix = string.Empty;
 });
 
