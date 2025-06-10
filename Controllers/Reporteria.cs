@@ -45,6 +45,15 @@ namespace MyApiProject.Controllers
             [FromQuery] int pageSize = 10) =>
             await GetReportData(request, sum, distinct, page, pageSize, GetMermasBaseQuery(), ReportType.Mermas);
 
+        [HttpPost("api/v2/reporteria/almacen")]
+        public async Task<IActionResult> ObtenerAlmacen(
+            [FromBody] ReporteriaRequest request,
+            [FromQuery] bool sum = false,
+            [FromQuery] bool distinct = false,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10) =>
+            await GetReportData(request, sum, distinct, page, pageSize, GetAlmacenBaseQuery(), ReportType.Mermas);
+
         #region Enums and Constants
         private enum ReportType { Ventas, Compras, Mermas }
 
@@ -546,6 +555,37 @@ namespace MyApiProject.Controllers
                 WHERE 
                     inv.Concepto LIKE '%MERMAS%'
                     AND inv.Estatus = 'CONCLUIDO'
+            ) AS MermasReport";
+        private string GetAlmacenBaseQuery() => @"
+            FROM (
+                SELECT 
+                    art.Articulo,
+                    art.Descripcion1 AS Nombre,
+                    art.Categoria,
+                    art.Grupo,
+                    art.Linea,
+                    art.Familia,
+                    inv.Concepto,
+                    invd.Cantidad,
+                    invd.Costo,
+                    invd.Unidad,
+                    SUM(invd.Cantidad) OVER (PARTITION BY invd.Articulo, inv.FechaEmision) AS TotalCantidad,
+                    SUM(invd.Costo * invd.Cantidad) OVER (PARTITION BY invd.Articulo, inv.FechaEmision) AS TotalImporte,
+                    inv.Sucursal,
+                    inv.movid,
+                    inv.estatus,
+                    inv.FechaEmision,
+                    FORMAT(inv.FechaEmision, 'dd', 'es-ES') AS Dia,
+                    FORMAT(inv.FechaEmision, 'MMMM', 'es-ES') AS Mes,
+                    YEAR(inv.FechaEmision) AS Año
+                FROM 
+                    [TC032841E].dbo.INVD invd
+                LEFT JOIN 
+                    [TC032841E].dbo.inv inv ON inv.ID = invd.ID 
+                LEFT JOIN 
+                    [TC032841E].dbo.Art art ON art.Articulo = invd.Articulo
+                WHERE 
+                    inv.Estatus = 'CONCLUIDO'
             ) AS MermasReport";
         #endregion
     }
