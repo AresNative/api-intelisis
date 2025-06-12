@@ -478,51 +478,52 @@ namespace MyApiProject.Controllers
                     AND INV.Estatus IN ('CONCLUIDO')
             ) AS VentasReport";
 
-        private string GetComprasBaseQuery() => @"FROM (
-            SELECT
-                INVD.Codigo, 
-                C.Nombre AS Proveedor,
-                ART.Fabricante,
-                'COMPRA' AS Tipo,
-                INV.Mov AS Movimiento,
-                INVD.Articulo,
-                ART.Descripcion1 AS Nombre,
-                ART.Categoria,
-                ART.Grupo,
-                ART.Linea,
-                ART.Familia,
-                INVD.Unidad,
-                INVD.Factor,
-                (INVD.CantidadInventario / INVD.Cantidad) AS Equivalencia,
-                INVD.Cantidad,
-                INVD.CantidadInventario,
-                INVD.Costo AS CostoUnitario,
-                (INVD.Costo * INVD.Cantidad) AS CostoTotal,
-                CASE 
-                    WHEN INVD.Almacen = 'ALMVGPE' THEN 'LIZ'
-                    WHEN INVD.Almacen = 'ALMPALM' THEN 'PALMAS'
-                    WHEN INVD.Almacen = 'ALMTESTE' THEN 'TESTERAZO'
-                    WHEN INVD.Almacen = 'ALMMAYO' THEN 'MAYOREO'
-                    ELSE INVD.Almacen
-                END AS Almacen,
-                INVD.Impuesto1 AS IVA,
-                INVD.Impuesto2 AS IEPS,
-                FORMAT((INVD.DescuentoImporte / NULLIF(INVD.COSTO * INVD.Cantidad, 0)) * 100, 'N2') AS PorcentajeDescuento,
-                FechaEmision,
-                FORMAT(FechaEmision, 'MMMM', 'es-ES') AS Mes,
-                YEAR(FechaEmision) AS Año
-            FROM 
-                [TC032841E].dbo.COMPRAD InvD 
-            LEFT JOIN 
-                [TC032841E].dbo.ART ON INVD.Articulo = ART.Articulo
-            LEFT JOIN 
-                [TC032841E].dbo.COMPRA INV ON INVD.ID = INV.ID
-            LEFT JOIN 
-                [TC032841E].dbo.PROV C ON INV.Proveedor = C.Proveedor
-            WHERE 
-                INV.Mov = 'ENTRADA COMPRA'
-                AND INV.Estatus = 'CONCLUIDO'
-            ) AS ComprasReport";
+        private string GetComprasBaseQuery() => @"
+            FROM (
+                SELECT
+                    INVD.Codigo, 
+                    C.Nombre AS Proveedor,
+                    ART.Fabricante,
+                    'COMPRA' AS Tipo,
+                    INV.Mov AS Movimiento,
+                    INVD.Articulo,
+                    ART.Descripcion1 AS Nombre,
+                    ART.Categoria,
+                    ART.Grupo,
+                    ART.Linea,
+                    ART.Familia,
+                    INVD.Unidad,
+                    INVD.Factor,
+                    (INVD.CantidadInventario / INVD.Cantidad) AS Equivalencia,
+                    INVD.Cantidad,
+                    INVD.CantidadInventario,
+                    INVD.Costo AS CostoUnitario,
+                    (INVD.Costo * INVD.Cantidad) AS CostoTotal,
+                    CASE 
+                        WHEN INVD.Almacen = 'ALMVGPE' THEN 'LIZ'
+                        WHEN INVD.Almacen = 'ALMPALM' THEN 'PALMAS'
+                        WHEN INVD.Almacen = 'ALMTESTE' THEN 'TESTERAZO'
+                        WHEN INVD.Almacen = 'ALMMAYO' THEN 'MAYOREO'
+                        ELSE INVD.Almacen
+                    END AS Almacen,
+                    INVD.Impuesto1 AS IVA,
+                    INVD.Impuesto2 AS IEPS,
+                    FORMAT((INVD.DescuentoImporte / NULLIF(INVD.COSTO * INVD.Cantidad, 0)) * 100, 'N2') AS PorcentajeDescuento,
+                    FechaEmision,
+                    FORMAT(FechaEmision, 'MMMM', 'es-ES') AS Mes,
+                    YEAR(FechaEmision) AS Año
+                FROM 
+                    [TC032841E].dbo.COMPRAD InvD 
+                LEFT JOIN 
+                    [TC032841E].dbo.ART ON INVD.Articulo = ART.Articulo
+                LEFT JOIN 
+                    [TC032841E].dbo.COMPRA INV ON INVD.ID = INV.ID
+                LEFT JOIN 
+                    [TC032841E].dbo.PROV C ON INV.Proveedor = C.Proveedor
+                WHERE 
+                    INV.Mov = 'ENTRADA COMPRA'
+                    AND INV.Estatus = 'CONCLUIDO'
+                ) AS ComprasReport";
 
         private string GetMermasBaseQuery() => @"
             FROM (
