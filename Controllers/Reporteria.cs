@@ -55,9 +55,9 @@ namespace MyApiProject.Controllers
             await GetReportData(request, sum, distinct, page, pageSize, GetAlmacenBaseQuery(), ReportType.Mermas);
 
         #region Enums and Constants
-        private enum ReportType { Ventas, Compras, Mermas }
+        public enum ReportType { Ventas, Compras, Mermas }
 
-        private class ReportConfig
+        public class ReportConfig
         {
             public string DefaultOrderField { get; set; }
             public string SumOrderField { get; set; }
@@ -85,7 +85,7 @@ namespace MyApiProject.Controllers
         #endregion
 
         #region Private Methods
-        private async Task<IActionResult> GetReportData(
+        public async Task<IActionResult> GetReportData(
             ReporteriaRequest request,
             bool sum,
             bool distinct,
@@ -169,7 +169,7 @@ namespace MyApiProject.Controllers
                 return HandleException(ex, $"{countQuery}; {dataQuery}");
             }
         }
-        private string BuildCacheKey(
+        public string BuildCacheKey(
                    ReportType reportType,
                    bool sum,
                    bool distinct,
@@ -190,7 +190,7 @@ namespace MyApiProject.Controllers
             }
         }
 
-        private (List<string> whereClauses, List<SqlParameter> parameters) BuildFilters(List<BusquedaParams> filtros)
+        public (List<string> whereClauses, List<SqlParameter> parameters) BuildFilters(List<BusquedaParams> filtros)
         {
             var whereClauses = new List<string>();
             var parameters = new List<SqlParameter>();
@@ -220,7 +220,7 @@ namespace MyApiProject.Controllers
             return (whereClauses, parameters);
         }
 
-        private bool ProcessDateRange(List<BusquedaParams> fechaParams, List<string> whereClauses, List<SqlParameter> parameters)
+        public bool ProcessDateRange(List<BusquedaParams> fechaParams, List<string> whereClauses, List<SqlParameter> parameters)
         {
             if (fechaParams.Count == 2)
             {
@@ -240,7 +240,7 @@ namespace MyApiProject.Controllers
             return false;
         }
 
-        private (string clause, SqlParameter param) BuildFilterClause(BusquedaParams filter, Dictionary<string, int> parameterCounters)
+        public (string clause, SqlParameter param) BuildFilterClause(BusquedaParams filter, Dictionary<string, int> parameterCounters)
         {
             if (string.IsNullOrWhiteSpace(filter.Value)) return (null, null);
 
@@ -278,7 +278,7 @@ namespace MyApiProject.Controllers
             return (clause, new SqlParameter(paramName, paramValue));
         }
 
-        private List<string> GroupConditions(List<string> whereClauses)
+        public List<string> GroupConditions(List<string> whereClauses)
         {
             return whereClauses
                 .GroupBy(c => c.Split(' ', 2)[0])
@@ -288,7 +288,7 @@ namespace MyApiProject.Controllers
                 .ToList();
         }
 
-        private string GetSelectColumns(List<SumaParams> selects)
+        public string GetSelectColumns(List<SumaParams> selects)
         {
             if (selects == null) return string.Empty;
 
@@ -297,7 +297,7 @@ namespace MyApiProject.Controllers
                 .Select(s => s.Key));
         }
 
-        private (string dataQuery, string countQuery) BuildQueries(
+        public (string dataQuery, string countQuery) BuildQueries(
             ReportType reportType,
             bool sum,
             bool distinct,
@@ -379,7 +379,7 @@ namespace MyApiProject.Controllers
             return (normalDataQuery, normalCountQuery);
         }
 
-        private string GetOrderByField(OrderParams orderBy, ReportConfig config, bool sum, string selectColumns)
+        public string GetOrderByField(OrderParams orderBy, ReportConfig config, bool sum, string selectColumns)
         {
             if (orderBy != null && !string.IsNullOrEmpty(orderBy.Key))
             {
@@ -393,11 +393,11 @@ namespace MyApiProject.Controllers
             return config.DefaultOrderField;
         }
 
-        private async Task<(int totalRecords, List<Dictionary<string, object>> results)> ExecuteQueryAsync(
-    string combinedQuery,
-    List<SqlParameter> parameters,
-    int offset,
-    int pageSize)
+        public async Task<(int totalRecords, List<Dictionary<string, object>> results)> ExecuteQueryAsync(
+        string combinedQuery,
+        List<SqlParameter> parameters,
+        int offset,
+        int pageSize)
         {
             await using var connection = await OpenConnectionAsync();
             await using var command = new SqlCommand(combinedQuery, connection)

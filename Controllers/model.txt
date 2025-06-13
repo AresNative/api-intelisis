@@ -1,0 +1,66 @@
+using Microsoft.AspNetCore.Mvc;
+namespace MyApiProject.Controllers
+{
+    public partial class Reporteria : BaseController
+    {
+
+        [HttpPost("api/v2/reporteria/pickup")]
+        public async Task<IActionResult> ObtenerPickup(
+            [FromBody] ReporteriaRequest request,
+            [FromQuery] bool sum = false,
+            [FromQuery] bool distinct = false,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10) =>
+            await GetReportData(request, sum, distinct, page, pageSize, GetArtsPickUpQuery(), ReportType.Ventas);
+
+        #region Enums and Constants
+
+        private string GetArtsPickUpQuery() => @"
+            FROM (
+                SELECT 
+                    INVD.Codigo,
+                    C.Nombre AS Cliente,
+                    'VENTA' AS Tipo,
+                    INV.Mov AS Movimiento,
+                    INVD.Articulo,
+                    ART.Descripcion1 AS Nombre,
+                    ART.Categoria,
+                    ART.Grupo,
+                    ART.Linea,
+                    ART.Familia,
+                    INVD.Unidad,
+                    INVD.Factor,
+                    (INVD.CantidadInventario / INVD.Cantidad) AS Equivalencia,
+                    INVD.Costo AS CostoUnitario,
+                    (INVD.Costo * INVD.Cantidad) AS CostoTotal,
+                    INVD.Precio AS ImporteUnitario,
+                    (INVD.Precio * INVD.Cantidad) AS ImporteTotal,
+                    INVD.Cantidad,
+                    CASE 
+                        WHEN INVD.Almacen = 'ALMVGPE' THEN 'LIZ'
+                        WHEN INVD.Almacen = 'ALMPALM' THEN 'PALMAS'
+                        WHEN INVD.Almacen = 'ALMTESTE' THEN 'TESTERAZO'
+                        WHEN INVD.Almacen = 'ALMMAYO' THEN 'MAYOREO'
+                        ELSE INVD.Almacen
+                    END AS Almacen,
+                    FechaEmision,
+                    FORMAT(FechaEmision, 'MMMM', 'es-ES') AS Mes,
+                    YEAR(FechaEmision) AS Año
+                FROM 
+                    [TC032841E].dbo.VENTAD INVD 
+                LEFT JOIN 
+                    [TC032841E].dbo.ART ON INVD.Articulo = ART.Articulo
+                LEFT JOIN 
+                    [TC032841E].dbo.VENTA INV ON INVD.ID = INV.ID
+                LEFT JOIN 
+                    [TC032841E].dbo.Cte C ON INV.Cliente = C.Cliente
+                WHERE 
+                    INV.Mov NOT IN ('FACTURA GLOBAL', 'FACTURA SUCURSAL', 'FACTURA')
+                    AND INV.Estatus IN ('CONCLUIDO')
+            ) AS VentasReport";
+
+        #endregion
+    }
+
+
+}
