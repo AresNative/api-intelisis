@@ -3,18 +3,26 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Caching.Memory;
 using System.Data;
 using MyApiProject.Models;
+using System.Security.Cryptography;
+using System.Text;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using System;
 
 namespace MyApiProject.Controllers
 {
     public partial class PickUp : BaseController
     {
         private readonly IMemoryCache _memoryCache;
+
         public class FilterRequest
         {
             public List<BusquedaParams> Filtros { get; set; } = new();
             public List<SumaParams> Selects { get; set; } = new();
             public List<OrderParams> Order { get; set; } = new();
         }
+
         public PickUp(IConfiguration configuration, IMemoryCache memoryCache) : base(configuration, memoryCache)
         {
             _memoryCache = memoryCache;
@@ -28,6 +36,14 @@ namespace MyApiProject.Controllers
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 10)
         {
+            // Construir clave de caché única
+            string cacheKey = BuildCacheKey(filtro, categoria, listaPrecio, page, pageSize);
+
+            // Verificar caché
+            if (_memoryCache.TryGetValue(cacheKey, out object cachedResponse))
+            {
+                return Ok(cachedResponse);
+            }
 
             page = Math.Max(page, 1);
             pageSize = Math.Max(pageSize, 10);
@@ -70,7 +86,8 @@ namespace MyApiProject.Controllers
                             art.Unidad,
                             lpu.Precio AS PrecioRegular,
                             au.Unidad AS UnidadFactor,
-                            au.Factor
+                            au.Factor,
+                            inv.TotalInventario
                         {baseQuery}
                     )
                     SELECT *
@@ -95,7 +112,8 @@ namespace MyApiProject.Controllers
                         lpu.Precio AS PrecioRegular,
                         au.Unidad AS UnidadFactor,
                         au.Factor,
-                        art.Articulo
+                        art.Articulo,
+                            inv.TotalInventario
                     {baseQuery}
                     WHERE 
                         cb.Codigo = @Filtro
@@ -110,13 +128,7 @@ namespace MyApiProject.Controllers
                     WHERE 
                         cb.Codigo = @Filtro
                         OR art.Articulo = @Filtro
-                        OR art.Descripcion1 LIKE '%' + @Filtro + '%'
-                    GROUP BY 
-                        cb.Codigo,
-                        art.Articulo,
-                        art.Descripcion1
-                    ORDER BY art.Descripcion1
-                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+                        OR art.Descripcion1 LIKE '%' + @Filtro + '%'";
             }
             else
             {
@@ -130,7 +142,8 @@ namespace MyApiProject.Controllers
                         lpu.Unidad,
                         lpu.Precio AS PrecioRegular,
                         au.Unidad AS UnidadFactor,
-                        au.Factor
+                        au.Factor,
+                            inv.TotalInventario
                     {baseQuery}
                     ORDER BY art.Descripcion1
                     OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
@@ -143,7 +156,7 @@ namespace MyApiProject.Controllers
             string combinedQuery = $"{countQuery}; {dataQuery}";
 
             parameters.Add(new SqlParameter("@Filtro", filtro ?? string.Empty));
-            parameters.Add(new SqlParameter("@Categoria", categoria ?? string.Empty));//@Categoria
+            parameters.Add(new SqlParameter("@Categoria", categoria ?? string.Empty));
             parameters.Add(new SqlParameter("@ListaPrecio", listaPrecio ?? string.Empty));
             parameters.Add(new SqlParameter("@Offset", offset));
             parameters.Add(new SqlParameter("@PageSize", pageSize));
@@ -196,7 +209,7 @@ namespace MyApiProject.Controllers
                     WHERE 
                         od.Articulo IN (SELECT value FROM STRING_SPLIT(@Cuentas, ','))
                         AND o.FechaD < GETDATE() 
-                        AND o.FechaA > GETDATE()"; // Tu query de ofertas
+                        AND o.FechaA > GETDATE()";
 
                     using (var ofertasCommand = new SqlCommand(ofertasQuery, connection))
                     {
@@ -227,18 +240,39 @@ namespace MyApiProject.Controllers
                     }
                 }
 
-                return Ok(new
+                var response = new
                 {
                     TotalRecords = totalRecords,
                     TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
                     Page = page,
                     PageSize = pageSize,
                     Data = results
-                });
+                };
+
+                // Almacenar en caché
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetSlidingExpiration(TimeSpan.FromMinutes(1));
+                _memoryCache.Set(cacheKey, response, cacheOptions);
+
+                return Ok(response);
             }
             catch (Exception ex)
             {
                 return HandleException(ex, combinedQuery);
+            }
+        }
+
+        private string BuildCacheKey(string filtro, string categoria, string listaPrecio, int page, int pageSize)
+        {
+            var rawKey = $"{filtro}_{categoria}_{listaPrecio}_{page}_{pageSize}";
+
+            using (var sha1 = SHA1.Create())
+            {
+                byte[] hash = sha1.ComputeHash(Encoding.UTF8.GetBytes(rawKey));
+                var sb = new StringBuilder(40);
+                foreach (byte b in hash)
+                    sb.Append(b.ToString("x2"));
+                return sb.ToString();
             }
         }
 
@@ -286,7 +320,7 @@ namespace MyApiProject.Controllers
                         parameterCounters[filter.Key]++;
 
                     var paramName = $"@Codigo_{parameterCounters[filter.Key]}";
-                    whereClauses.Add($"Articulo IN (SELECT Articulo FROM [LOCAL_TC032391E].[dbo].[{tableName}] WHERE Codigo {operatorClause} {paramName})");
+                    whereClauses.Add($"Articulo IN (SELECT Articulo FROM [TC032391E].[dbo].[{tableName}] WHERE Codigo {operatorClause} {paramName})");
 
                     parameters.Add(new SqlParameter(paramName, operatorClause == "LIKE" ? $"%{filter.Value}%" : filter.Value));
                 }
@@ -305,6 +339,7 @@ namespace MyApiProject.Controllers
                 }
             }
         }
+
         public List<string> AgruparCondiciones(List<string> whereClauses)
         {
             var dict = new Dictionary<string, List<string>>();
@@ -323,6 +358,7 @@ namespace MyApiProject.Controllers
                     : kvp.Value.First()
             ).ToList();
         }
+
         public async Task<string> GuardarArchivo(IFormFile archivo)
         {
             var uploadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "uploads/listas");

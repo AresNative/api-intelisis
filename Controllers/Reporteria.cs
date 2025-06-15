@@ -54,8 +54,17 @@ namespace MyApiProject.Controllers
             [FromQuery] int pageSize = 10) =>
             await GetReportData(request, sum, distinct, page, pageSize, GetAlmacenBaseQuery(), ReportType.Mermas);
 
+        [HttpPost("api/v2/reporteria/utilidadbruta")]
+        public async Task<IActionResult> ObtenerUtilidadBruta(
+               [FromBody] ReporteriaRequest request,
+               [FromQuery] bool sum = false,
+               [FromQuery] bool distinct = false,
+               [FromQuery] int page = 1,
+               [FromQuery] int pageSize = 10) =>
+               await GetReportData(request, sum, distinct, page, pageSize, GetUtilidadBrutaBaseQuery(), ReportType.UtilidadBruta);
+
         #region Enums and Constants
-        public enum ReportType { Ventas, Compras, Mermas }
+        public enum ReportType { Ventas, Compras, Mermas, UtilidadBruta }
 
         public class ReportConfig
         {
@@ -80,11 +89,24 @@ namespace MyApiProject.Controllers
                 DefaultOrderField = "Articulo ASC",
                 SumOrderField = "TotalImporte DESC",
                 SumFields = "SUM(Cantidad) AS Cantidad, SUM(TotalImporte) AS TotalImporte"
+            }},
+            { ReportType.UtilidadBruta, new ReportConfig {
+                DefaultOrderField = "UtilidadBruta DESC",
+                SumOrderField = "UtilidadBruta DESC",
+                SumFields = "SUM(TotalComprado) AS TotalComprado, " +
+                            "SUM(TotalVendido) AS TotalVendido, " +
+                            "SUM(CostoTotalCompra) AS CostoTotalCompra, " +
+                            "SUM(CostoTotalVenta) AS CostoTotalVenta, " +
+                            "SUM(ImporteTotalVenta) AS ImporteTotalVenta, " +
+                            "SUM(UtilidadBruta) AS UtilidadBruta, " +
+                            "(SUM(ImporteTotalVenta) - SUM(CostoTotalVenta)) AS UtilidadBrutaRecalculada, " +
+                            "((SUM(ImporteTotalVenta) - SUM(CostoTotalVenta)) / NULLIF(SUM(ImporteTotalVenta), 0) * 100 AS PorcentajeUtilidadBrutaRecalculada"
             }}
         };
         #endregion
 
         #region Private Methods
+
         public async Task<IActionResult> GetReportData(
             ReporteriaRequest request,
             bool sum,
@@ -557,6 +579,49 @@ namespace MyApiProject.Controllers
                     inv.Concepto LIKE '%MERMAS%'
                     AND inv.Estatus = 'CONCLUIDO'
             ) AS MermasReport";
+        private string GetUtilidadBrutaBaseQuery() => @"
+        FROM (
+            SELECT 
+                V.Articulo,
+                A.Descripcion1 AS Nombre,
+                ISNULL(C.TotalComprado, 0) AS TotalComprado,
+                ISNULL(V.TotalVendido, 0) AS TotalVendido,
+                ISNULL(C.CostoTotalCompra, 0) AS CostoTotalCompra,
+                ISNULL(V.CostoTotalVenta, 0) AS CostoTotalVenta,
+                ISNULL(V.ImporteTotalVenta, 0) AS ImporteTotalVenta,
+                (ISNULL(V.ImporteTotalVenta, 0) - ISNULL(V.CostoTotalVenta, 0)) AS UtilidadBruta,
+                CASE 
+                    WHEN ISNULL(V.ImporteTotalVenta, 0) = 0 THEN 0
+                    ELSE (ISNULL(V.ImporteTotalVenta, 0) - ISNULL(V.CostoTotalVenta, 0)) * 100.0 / V.ImporteTotalVenta 
+                END AS PorcentajeUtilidadBruta
+            FROM (
+                SELECT 
+                    d.Articulo,
+                    SUM(d.Cantidad) AS TotalVendido,
+                    SUM(d.Costo * d.Cantidad) AS CostoTotalVenta,
+                    SUM(d.Precio * d.Cantidad) AS ImporteTotalVenta
+                FROM [TC032841E].dbo.VENTAD d
+                INNER JOIN [TC032841E].dbo.VENTA v 
+                    ON d.ID = v.ID
+                    AND v.Estatus = 'CONCLUIDO'
+                    AND v.Mov NOT IN ('FACTURA GLOBAL', 'FACTURA SUCURSAL', 'FACTURA')
+                GROUP BY d.Articulo
+            ) V
+            LEFT JOIN (
+                SELECT 
+                    d.Articulo,
+                    SUM(d.Cantidad) AS TotalComprado,
+                    SUM(d.Costo * d.Cantidad) AS CostoTotalCompra
+                FROM [TC032841E].dbo.COMPRAD d
+                INNER JOIN [TC032841E].dbo.COMPRA c 
+                    ON d.ID = c.ID
+                    AND c.Estatus = 'CONCLUIDO'
+                    AND c.Mov = 'ENTRADA COMPRA'
+                GROUP BY d.Articulo
+            ) C ON V.Articulo = C.Articulo
+            LEFT JOIN [TC032841E].dbo.ART A 
+                ON V.Articulo = A.Articulo;
+        ) AS UtilidadBrutaReport";
         private string GetAlmacenBaseQuery() => @"
             FROM (
                 SELECT 
