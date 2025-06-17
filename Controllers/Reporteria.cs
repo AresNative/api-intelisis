@@ -620,7 +620,7 @@ namespace MyApiProject.Controllers
                 GROUP BY d.Articulo
             ) C ON V.Articulo = C.Articulo
             LEFT JOIN [TC032841E].dbo.ART A 
-                ON V.Articulo = A.Articulo;
+                ON V.Articulo = A.Articulo
         ) AS UtilidadBrutaReport";
         private string GetAlmacenBaseQuery() => @"
             FROM (
