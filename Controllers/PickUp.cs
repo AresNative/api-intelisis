@@ -5,10 +5,6 @@ using System.Data;
 using MyApiProject.Models;
 using System.Security.Cryptography;
 using System.Text;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using System;
 
 namespace MyApiProject.Controllers
 {
@@ -51,22 +47,32 @@ namespace MyApiProject.Controllers
 
             const string baseQuery = @"
                     FROM [TC032841E].[dbo].[CB] AS cb
-                        INNER JOIN [TC032841E].[dbo].[Art] AS art 
-                            ON cb.Cuenta = art.Articulo
-                        INNER JOIN [TC032841E].[dbo].[ListaPreciosDUnidad] AS lpu
-                            ON art.Articulo = lpu.Articulo
-                            AND cb.Unidad = lpu.Unidad
-                            AND lpu.Lista = @ListaPrecio
-                        INNER JOIN [TC032841E].[dbo].[ArtUnidad] AS au
-                            ON art.Articulo = au.Articulo
-                            AND lpu.Unidad = au.Unidad  
-                        INNER JOIN (
-                            SELECT Articulo, SUM(CantidadInventario) AS TotalInventario
-                            FROM [TC032841E].[dbo].InvD 
-                            WHERE CantidadInventario > 0
-                            GROUP BY Articulo
-                        ) AS inv 
-                            ON art.Articulo = inv.Articulo";
+                    INNER JOIN [TC032841E].[dbo].[Art] AS art 
+                        ON cb.Cuenta = art.Articulo
+                    INNER JOIN [TC032841E].[dbo].[ListaPreciosDUnidad] AS lpu
+                        ON art.Articulo = lpu.Articulo
+                        AND cb.Unidad = lpu.Unidad
+                        AND lpu.Lista = @ListaPrecio
+                    INNER JOIN [TC032841E].[dbo].[ArtUnidad] AS au
+                        ON art.Articulo = au.Articulo
+                        AND lpu.Unidad = au.Unidad  
+                    INNER JOIN (
+                        SELECT 
+                            Articulo,
+	                        SUM(Inventario)  as TotalInventario
+                        FROM ArtExistenciaInv 
+                        WHERE 
+                            Almacen =
+                            CASE 
+                                WHEN @ListaPrecio = '(Precio Lista)' THEN 'ALMMAYO'
+                                WHEN @ListaPrecio = '(Precio 4)' THEN 'ALMTESTE'
+                                WHEN @ListaPrecio = '(Precio 3)' THEN 'ALMPALM'
+                                WHEN @ListaPrecio = '(Precio 2)' THEN 'ALMGPE'
+                                ELSE'(Precio Lista)'
+                                END
+                        GROUP BY Articulo
+                    ) AS inv 
+                        ON art.Articulo = inv.Articulo";
 
             var parameters = new List<SqlParameter>();
 
@@ -113,7 +119,7 @@ namespace MyApiProject.Controllers
                         au.Unidad AS UnidadFactor,
                         au.Factor,
                         art.Articulo,
-                            inv.TotalInventario
+                        inv.TotalInventario
                     {baseQuery}
                     WHERE 
                         cb.Codigo = @Filtro
@@ -143,7 +149,7 @@ namespace MyApiProject.Controllers
                         lpu.Precio AS PrecioRegular,
                         au.Unidad AS UnidadFactor,
                         au.Factor,
-                            inv.TotalInventario
+                        inv.TotalInventario
                     {baseQuery}
                     ORDER BY art.Descripcion1
                     OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
