@@ -65,9 +65,9 @@ namespace MyApiProject.Controllers
                             Almacen =
                             CASE 
                                 WHEN @ListaPrecio = '(Precio Lista)' THEN 'ALMMAYO'
-                                WHEN @ListaPrecio = '(Precio 4)' THEN 'ALMTESTE'
+                                WHEN @ListaPrecio = '(Precio 4)' THEN 'ALMGPE'
                                 WHEN @ListaPrecio = '(Precio 3)' THEN 'ALMPALM'
-                                WHEN @ListaPrecio = '(Precio 2)' THEN 'ALMGPE'
+                                WHEN @ListaPrecio = '(Precio 2)' THEN 'ALMTESTE'
                                 ELSE'(Precio Lista)'
                                 END
                         GROUP BY Articulo
