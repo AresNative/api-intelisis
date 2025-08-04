@@ -118,8 +118,8 @@ namespace MyApiProject.Controllers
                             "SUM(CostoTotalVenta) AS CostoTotalVenta, " +
                             "SUM(ImporteTotalVenta) AS ImporteTotalVenta, " +
                             "SUM(UtilidadBruta) AS UtilidadBruta, " +
-                            "(SUM(CostoTotalVenta)- SUM(ImporteTotalVenta)) AS UtilidadBrutaRecalculada, " +
-                            "((SUM(CostoTotalVenta)- SUM(ImporteTotalVenta))) / NULLIF(SUM(ImporteTotalVenta), 0) * 100 AS PorcentajeUtilidadBrutaRecalculada",
+                            "(SUM(ImporteTotalVenta) - SUM(CostoTotalVenta)) AS UtilidadBrutaRecalculada, " +
+                            "((SUM(ImporteTotalVenta) - SUM(CostoTotalVenta)) / NULLIF(SUM(ImporteTotalVenta), 0) * 100 AS PorcentajeUtilidadBrutaRecalculada",
                 IndexedColumns = new[] { "Articulo", "Nombre" }
             }}
         };
@@ -480,14 +480,27 @@ namespace MyApiProject.Controllers
 
             return (normalDataQuery, normalCountQuery);
         }
-
+        // Método para clonar parámetros
+        private List<SqlParameter> CloneParameters(List<SqlParameter> parameters)
+        {
+            return parameters.Select(p => new SqlParameter
+            {
+                ParameterName = p.ParameterName,
+                Value = p.Value,
+                SqlDbType = p.SqlDbType,
+                Size = p.Size,
+                Direction = p.Direction
+                // Copia otras propiedades si son necesarias
+            }).ToList();
+        }
         public async Task<(int totalRecords, List<Dictionary<string, object>> results)> ExecuteOptimizedQueryAsync(
-    string countQuery,
-    string dataQuery,
-    List<SqlParameter> parameters,
-    int offset,
-    int pageSize,
-    string connectionId = null)
+            string countQuery,
+            string dataQuery,
+            List<SqlParameter> parameters,
+            int offset,
+            int pageSize,
+            string connectionId = null
+        )
         {
             // Notificar conexión a la base de datos
             if (!string.IsNullOrEmpty(connectionId))
@@ -509,7 +522,8 @@ namespace MyApiProject.Controllers
             // Ejecutar COUNT en un comando separado
             await using (var countCommand = new SqlCommand(countQuery, connection))
             {
-                countCommand.Parameters.AddRange(parameters.ToArray());
+                var countParams = CloneParameters(parameters); // Clonar
+                countCommand.Parameters.AddRange(countParams.ToArray());
                 countCommand.CommandTimeout = 60;
                 totalRecords = Convert.ToInt32(await countCommand.ExecuteScalarAsync());
             }
@@ -525,9 +539,10 @@ namespace MyApiProject.Controllers
             var results = new List<Dictionary<string, object>>();
             await using (var dataCommand = new SqlCommand(dataQuery, connection))
             {
-                dataCommand.Parameters.AddRange(parameters.ToArray());
-                dataCommand.Parameters.Add(new SqlParameter("@Offset", offset));
-                dataCommand.Parameters.Add(new SqlParameter("@PageSize", pageSize));
+                var dataParams = CloneParameters(parameters); // Clonar
+                dataParams.Add(new SqlParameter("@Offset", offset));
+                dataParams.Add(new SqlParameter("@PageSize", pageSize));
+                dataCommand.Parameters.AddRange(dataParams.ToArray());
                 dataCommand.CommandTimeout = 120;
 
                 // Cambiar a CommandBehavior.Default para acceso aleatorio a columnas

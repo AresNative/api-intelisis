@@ -63,7 +63,6 @@ builder.Services.AddScoped<TokensUtils>();
 
 // ↓↓↓ Agregar SignalR a los servicios ↓↓↓
 builder.Services.AddSignalR();
-
 // Swagger + JWT in UI
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>

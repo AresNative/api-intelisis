@@ -59,8 +59,8 @@ namespace MyApiProject.Controllers
                     INNER JOIN (
                         SELECT 
                             Articulo,
-	                        SUM(Inventario)  as TotalInventario
-                        FROM ArtExistenciaInv 
+	                        SUM(DispMenosApartado)  as TotalInventario
+                        FROM ArtDisponible 
                         WHERE 
                             Almacen =
                             CASE 
