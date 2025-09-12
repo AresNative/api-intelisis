@@ -1,27 +1,29 @@
-// Program.cs
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using MyApiProject.Hubs;
 using System.Text;
-using MyApiProject.Services;  // <-- para IAIService
 
 var builder = WebApplication.CreateBuilder(args);
 var configuration = builder.Configuration;
 
-// CORS
+// Configuración de CORS optimizada
 var allowedCorsOrigins = configuration.GetSection("AllowedCorsOrigins").Get<string[]>() ?? Array.Empty<string>();
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowedCorsOrigins", policy =>
+    {
         policy.WithOrigins(allowedCorsOrigins)
               .AllowAnyHeader()
-              .AllowAnyMethod());
+              .AllowAnyMethod();
+    });
 });
 
-// JWT Authentication
+// Configuración de autenticación JWT optimizada
 var jwtSettings = configuration.GetRequiredSection("JwtSettings");
-var key = Encoding.UTF8.GetBytes(jwtSettings["Key"]
-             ?? throw new InvalidOperationException("JWT Key is missing"));
+var key = Encoding.UTF8.GetBytes(jwtSettings["Key"] ?? throw new InvalidOperationException("JWT Key is missing"));
+
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -38,37 +40,45 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         options.SaveToken = true;
     });
 
-// Controllers + JSON settings
 builder.Services.AddControllers()
-    .AddJsonOptions(o =>
+    .AddJsonOptions(options =>
     {
-        o.JsonSerializerOptions.PropertyNamingPolicy = null;
-        o.JsonSerializerOptions.MaxDepth = 64;
+        options.JsonSerializerOptions.PropertyNamingPolicy = null; // Mantiene nombres originales de las propiedades
+        options.JsonSerializerOptions.MaxDepth = 64; // Un valor más razonable para evitar problemas de rendimiento
     })
-    .AddNewtonsoftJson(o =>
+    .AddNewtonsoftJson(options =>
     {
-        o.SerializerSettings.MaxDepth = 64;
-        o.SerializerSettings.Error = (sender, args) => args.ErrorContext.Handled = true;
+        options.SerializerSettings.MaxDepth = 64; // Limita la profundidad para evitar sobrecarga
+        options.SerializerSettings.Error = (sender, args) => args.ErrorContext.Handled = true;
     });
 
-// Caching
-builder.Services.AddMemoryCache();
+// Registro de servicios
+builder.Services.AddHttpClient();
 
-// HttpClient + IA service
-builder.Services.AddHttpClient<IAIService, FreeHuggingFaceAIService>();
-
-// Utilidades y otros servicios
-builder.Services.AddScoped<AuthUtils>();
-builder.Services.AddScoped<TokensUtils>();
+// Registrar IMemoryCache
+builder.Services.AddMemoryCache(); // Esto es necesario para resolver IMemoryCache
 
 // ↓↓↓ Agregar SignalR a los servicios ↓↓↓
 builder.Services.AddSignalR();
-// Swagger + JWT in UI
+var swaggerGroups = new[]
+{
+    new { Name = "general", Title = "Intelisis - Mercdos Mejia | AresNative" },
+    new { Name = "reporteria",   Title = "Reporteria" },
+    new { Name = "pickUp",   Title = "PickUp" },
+    new { Name = "articulos",   Title = "Articulos" },
+};
+// Configuración de Swagger con seguridad JWT optimizada
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Api Intelisis | Mercados-Liz by AresDev", Version = "v1" });
-    c.OperationFilter<FileUploadOperationFilter>();
+    foreach (var group in swaggerGroups)
+    {
+        c.SwaggerDoc(group.Name, new OpenApiInfo
+        {
+            Title = group.Title,
+            Version = "v1"
+        });
+    }
 
     var securityScheme = new OpenApiSecurityScheme
     {
@@ -84,26 +94,31 @@ builder.Services.AddSwaggerGen(c =>
             Id = "Bearer"
         }
     };
+
     c.AddSecurityDefinition("Bearer", securityScheme);
-    c.AddSecurityRequirement(new OpenApiSecurityRequirement {
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
         { securityScheme, Array.Empty<string>() }
     });
 });
 
 var app = builder.Build();
 
-// Middleware pipeline
+// Configuración del pipeline
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
-    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Mercados-Liz by AresDev");
-    c.RoutePrefix = string.Empty;
+    foreach (var group in swaggerGroups)
+    {
+        c.SwaggerEndpoint($"/swagger/{group.Name}/swagger.json", $"{group.Title} v1");
+    }
+    c.RoutePrefix = string.Empty; // Acceso a Swagger en la raíz
 });
 
 app.UseCors("AllowedCorsOrigins");
 app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
-
+app.MapHub<Hubs>("/Hubs");
 app.MapControllers();
 app.Run();

@@ -43,7 +43,7 @@ Si tiene algún comentario, comuníquese con nosotros en sistemas02@mercadosliz.
 
 ## Soporte
 
-Para recibir asistencia, envíe un correo electrónico a sistemas02@mercadosliz.com o únase a nuestro canal de Slack.
+Para recibir asistencia, envíe un correo electrónico a sistemas02@mercadosliz.com
 
 ## Instalacion
 
@@ -81,6 +81,24 @@ Iniciar api
 
 ```bash
   dotnet run
+```
+
+Actualizar ssl
+
+```bash
+    cd  C:\Win-ACME
+```
+
+```bash
+    wacs.exe --source manual --host api.mercadosliz.com
+```
+
+## Certificado necesarios
+
+Instalar un certificado de desarrollo HTTPS de ASP.NET Core.
+
+```bash
+    dotnet dev-certs https --trust
 ```
 
 ## Publicar
