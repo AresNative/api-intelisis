@@ -65,7 +65,6 @@ var swaggerGroups = new[]
     new { Name = "general", Title = "Intelisis - Mercdos Mejia | AresNative" },
     new { Name = "reporteria",   Title = "Reporteria" },
     new { Name = "pickUp",   Title = "PickUp" },
-    new { Name = "articulos",   Title = "Articulos" },
 };
 // Configuración de Swagger con seguridad JWT optimizada
 builder.Services.AddEndpointsApiExplorer();

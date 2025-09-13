@@ -99,33 +99,54 @@ namespace MyApiProject.Controllers.general
 
             int offset = (page - 1) * pageSize;
 
-            // Construir la cláusula SELECT basada en los selects solicitados
-            string selectClause = BuildSelectClause(request);
+            // Construir la cláusula SELECT y GROUP BY
+            var (selectClause, groupByClause) = BuildSelectClause(request);
             var baseQuery = $"FROM {table}";
             var whereClauses = new List<string>();
             var parameters = new List<SqlParameter>();
             var parameterCounters = new Dictionary<string, int>();
 
-            // Procesar filtros usando el método BuildFilters (solo procesará los no vacíos)
+            // Procesar filtros
             BuildFilters(request, whereClauses, parameters, parameterCounters);
 
-            // Agrupar condiciones para el mismo campo con OR
+            // Agrupar condiciones
             var groupedWhereClauses = AgruparCondiciones(whereClauses);
 
             var whereQuery = groupedWhereClauses.Any()
                 ? $"WHERE {string.Join(" AND ", groupedWhereClauses)}"
                 : "";
 
-            // Construir la cláusula ORDER BY (solo procesará los no vacíos)
+            // Construir ORDER BY
             string orderByClause = BuildOrderByClause(request);
 
-            var countQuery = $@"SELECT COUNT(*) AS TotalRegistros {baseQuery} {whereQuery}";
+            // Query para contar (usando subquery para evitar problemas con GROUP BY)
+            var countQuery = $@"
+        SELECT COUNT(*) AS TotalRegistros 
+        FROM (
+            SELECT {GetGroupByColumnsForCount(request)}
+            {baseQuery} {whereQuery}
+            {(string.IsNullOrEmpty(groupByClause) ? "" : groupByClause)}
+        ) AS CountTable";
 
-            var paginatedQuery = $@"
-        SELECT {selectClause}
-        {baseQuery} {whereQuery}
-        {orderByClause}
-        OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+            // Construir query principal de manera más segura
+            var queryBuilder = new System.Text.StringBuilder();
+            queryBuilder.Append($"SELECT {selectClause} ");
+            queryBuilder.Append($"{baseQuery} ");
+
+            if (!string.IsNullOrEmpty(whereQuery))
+                queryBuilder.Append($"{whereQuery} ");
+
+            if (!string.IsNullOrEmpty(groupByClause))
+                queryBuilder.Append($"{groupByClause} ");
+
+            if (string.IsNullOrEmpty(orderByClause))
+                queryBuilder.Append("ORDER BY id ");
+            else
+                queryBuilder.Append($"{orderByClause} ");
+
+            queryBuilder.Append("OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY");
+
+            var paginatedQuery = queryBuilder.ToString();
 
             try
             {
@@ -167,7 +188,7 @@ namespace MyApiProject.Controllers.general
                     results.Add(row);
                 }
 
-                // Crear clave de caché única basada en los filtros válidos
+                // Cache
                 var validFiltros = request.Filtros
                     .Where(f => !string.IsNullOrWhiteSpace(f.Key) && !string.IsNullOrWhiteSpace(f.Value))
                     .ToList();
