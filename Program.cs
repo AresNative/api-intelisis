@@ -109,7 +109,12 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 var app = builder.Build();
-
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(
+        Path.Combine(builder.Environment.ContentRootPath, "uploads")),
+    RequestPath = "/uploads"
+});
 // Configuración del pipeline
 app.UseSwagger();
 app.UseSwaggerUI(c =>
@@ -125,6 +130,6 @@ app.UseCors("AllowedCorsOrigins");
 app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
-app.MapHub<Hubs>("/Hubs");
+app.MapHub<GeneralHubs>("/Hubs");
 app.MapControllers();
 app.Run();

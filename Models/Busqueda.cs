@@ -10,6 +10,7 @@ namespace MyApiProject.Models
     public class SelectParams
     {
         public string? Key { get; set; }
+        public string? Alias { get; set; }  // <-- agregado
     }
 
     public class AgregacionParams

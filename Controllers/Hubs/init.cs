@@ -3,11 +3,43 @@ using Microsoft.Extensions.Caching.Memory;
 
 namespace MyApiProject.Hubs
 {
-    public class Hubs : Hub
+    public class GeneralHubs : Hub
     {
+        private static readonly HashSet<string> ConnectedGroups = new HashSet<string>();
+
+        public override async Task OnConnectedAsync()
+        {
+            // Unirse al grupo general de pedidos
+            await Groups.AddToGroupAsync(Context.ConnectionId, "PedidosGeneral");
+            ConnectedGroups.Add("PedidosGeneral");
+
+            await base.OnConnectedAsync();
+        }
+
+        public override async Task OnDisconnectedAsync(Exception? exception)
+        {
+            await Groups.RemoveFromGroupAsync(Context.ConnectionId, "PedidosGeneral");
+            await base.OnDisconnectedAsync(exception);
+        }
+
+        // Método para unirse a un pedido específico
+        public async Task UnirseAPedido(int pedidoId)
+        {
+            var groupName = $"Pedido_{pedidoId}";
+            await Groups.AddToGroupAsync(Context.ConnectionId, groupName);
+            ConnectedGroups.Add(groupName);
+        }
+
+        // Método para dejar un pedido específico
+        public async Task SalirDePedido(int pedidoId)
+        {
+            var groupName = $"Pedido_{pedidoId}";
+            await Groups.RemoveFromGroupAsync(Context.ConnectionId, groupName);
+        }
+
         private readonly IMemoryCache _memoryCache;
 
-        public Hubs(IMemoryCache memoryCache)
+        public GeneralHubs(IMemoryCache memoryCache)
         {
             _memoryCache = memoryCache;
         }

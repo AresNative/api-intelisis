@@ -1,9 +1,12 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Data.SqlClient;
 using Microsoft.AspNetCore.Authorization;
 using Newtonsoft.Json.Linq;
 using Microsoft.Extensions.Caching.Memory;
 using MyApiProject.Models;
+using Microsoft.AspNetCore.SignalR;
+using MyApiProject.Hubs;
 
 namespace MyApiProject.Controllers.general
 {
@@ -13,25 +16,47 @@ namespace MyApiProject.Controllers.general
     public partial class GeneralController : BaseController
     {
         private readonly IMemoryCache _memoryCache;
+        private readonly AuthUtils _authUtils;
 
-        public GeneralController(IConfiguration configuration, IMemoryCache memoryCache)
+        private readonly IHubContext<GeneralHubs> _hubContext;
+
+        public GeneralController(IConfiguration configuration, IMemoryCache memoryCache, AuthUtils authUtils,
+            IHubContext<GeneralHubs> hubContext)
             : base(configuration, memoryCache)
         {
             _memoryCache = memoryCache;
+            _authUtils = authUtils;
+            _hubContext = hubContext;
         }
-
+        [Authorize]
+        [HttpOptions("test-cors")]
+        public IActionResult TestCors()
+        {
+            return Ok(new
+            {
+                Message = "CORS configurado correctamente",
+                AllowedMethods = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+            });
+        }
         // ✅ Consulta general (sin ID)
-        /*[Authorize]*/
+        [Authorize]
         [HttpGet("consultar")]
         public async Task<IActionResult> ConsultarGeneral([FromQuery] string? table = "general")
         {
-            /*int userId;
-            try { userId = ObtenerUsuarioId(); }
-            catch (UnauthorizedAccessException ex) { return Unauthorized(new { Message = ex.Message }); }*/
-
             string cacheKey = $"general_all_{table}";
             if (_memoryCache.TryGetValue(cacheKey, out List<Dictionary<string, object>> cachedResults))
+            {
+                // Notificar a los clientes que se accedió a los datos
+                await _hubContext.Clients.Group("PedidosGeneral")
+                    .SendAsync("ConsultaRealizada", new
+                    {
+                        Tabla = table,
+                        Tipo = "ConsultaGeneral",
+                        Timestamp = DateTime.UtcNow
+                    });
+
                 return Ok(cachedResults);
+            }
 
             string query = $"SELECT * FROM {table}";
 
@@ -51,18 +76,23 @@ namespace MyApiProject.Controllers.general
 
             _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(5));
 
+            // Notificar a todos los clientes conectados
+            await _hubContext.Clients.Group("PedidosGeneral")
+                .SendAsync("DatosActualizados", new
+                {
+                    Tabla = table,
+                    Accion = "Consulta",
+                    TotalRegistros = results.Count,
+                    Timestamp = DateTime.UtcNow
+                });
             return Ok(results);
         }
 
         // ✅ Consulta por ID
-        /*[Authorize]*/
+        [Authorize]
         [HttpGet("consultar/{id}")]
         public async Task<IActionResult> ConsultarPorId(int id, [FromQuery] string? table = "general")
         {
-            /*int userId;
-            try { userId = ObtenerUsuarioId(); }
-            catch (UnauthorizedAccessException ex) { return Unauthorized(new { Message = ex.Message }); }*/
-
             string cacheKey = $"general_{table}_{id}";
             if (_memoryCache.TryGetValue(cacheKey, out List<Dictionary<string, object>> cachedResults))
                 return Ok(cachedResults);
@@ -85,10 +115,19 @@ namespace MyApiProject.Controllers.general
             }
 
             _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(5));
+            // Notificar a todos los clientes conectados
+            await _hubContext.Clients.Group("PedidosGeneral")
+                .SendAsync("DatosActualizados", new
+                {
+                    Tabla = table,
+                    Accion = "ConsultaID",
+                    TotalRegistros = results.Count,
+                    Timestamp = DateTime.UtcNow
+                });
             return Ok(results);
         }
 
-        /*[Authorize]*/
+        [Authorize]
         [HttpPost("consultar/filtros")]
         public async Task<IActionResult> ConsultarGeneralConFiltros(
             [FromBody] FiltrosRequest request,
@@ -121,14 +160,32 @@ namespace MyApiProject.Controllers.general
             // Construir ORDER BY
             string orderByClause = BuildOrderByClause(request);
 
-            // Query para contar (usando subquery para evitar problemas con GROUP BY)
+            string countColumns;
+
+            if (!string.IsNullOrEmpty(groupByClause))
+            {
+                // Usar alias si existe, sino usar Key
+                countColumns = string.Join(", ", request.Selects
+                    .Where(s => !string.IsNullOrWhiteSpace(s.Key))
+                    .Select(s =>
+                        !string.IsNullOrWhiteSpace(s.Alias)
+                            ? $"{s.Key} AS {s.Alias}"  // 👈 aplica alias en el SELECT del subquery
+                            : s.Key
+                    ));
+            }
+            else
+            {
+                countColumns = GetGroupByColumnsForCount(request);
+            }
+
+
             var countQuery = $@"
-        SELECT COUNT(*) AS TotalRegistros 
-        FROM (
-            SELECT {GetGroupByColumnsForCount(request)}
-            {baseQuery} {whereQuery}
-            {(string.IsNullOrEmpty(groupByClause) ? "" : groupByClause)}
-        ) AS CountTable";
+            SELECT COUNT(*) AS TotalRegistros 
+            FROM (
+                SELECT {countColumns}
+                {baseQuery} {whereQuery}
+                {groupByClause}
+            ) AS CountTable";
 
             // Construir query principal de manera más segura
             var queryBuilder = new System.Text.StringBuilder();
@@ -170,9 +227,9 @@ namespace MyApiProject.Controllers.general
 
                 paginatedParameters.AddRange(new[]
                 {
-            new SqlParameter("@Offset", offset),
-            new SqlParameter("@PageSize", pageSize)
-        });
+                    new SqlParameter("@Offset", offset),
+                    new SqlParameter("@PageSize", pageSize)
+                });
 
                 await using var command = new SqlCommand(paginatedQuery, connection);
                 command.Parameters.AddRange(paginatedParameters.ToArray());
@@ -201,6 +258,15 @@ namespace MyApiProject.Controllers.general
                 var cacheKey = $"general_filtros_{filtrosCacheKey}_page{page}_size{pageSize}";
                 _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(5));
 
+                // Notificar a todos los clientes conectados
+                await _hubContext.Clients.Group("PedidosGeneral")
+                    .SendAsync("DatosActualizados", new
+                    {
+                        Tabla = table,
+                        Accion = "ConsultaFiltros",
+                        TotalRegistros = results.Count,
+                        Timestamp = DateTime.UtcNow
+                    });
                 return Ok(new
                 {
                     TotalRecords = totalRecords,
@@ -212,26 +278,20 @@ namespace MyApiProject.Controllers.general
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { Message = "Error interno del servidor", Details = ex.Message });
+                return StatusCode(500, new { Message = "Error interno del servidor", Details = ex.Message, counter = countQuery, query = paginatedQuery });
             }
         }
 
         // ✅ Registro dinámico con JSON - CORREGIDO: Devuelve todos los datos insertados
-        /*[Authorize]*/
+        // ✅ Registro dinámico con SignalR
+        [Authorize]
         [HttpPost("register")]
         public async Task<IActionResult> Registrar([FromBody] JObject data, [FromQuery] string? table = "general")
         {
             if (data == null) return BadRequest(new { Message = "JSON inválido" });
-
-            /*int userId;
-            try { userId = ObtenerUsuarioId(); }
-            catch (UnauthorizedAccessException ex) { return Unauthorized(new { Message = ex.Message }); }*/
-
-            // 🔑 Construcción dinámica de columnas y parámetros
             var columnNames = string.Join(", ", data.Properties().Select(p => $"[{p.Name}]"));
             var parameterNames = string.Join(", ", data.Properties().Select(p => $"@{p.Name}"));
 
-            // Query modificada para devolver todos los campos insertados
             var query = $@"
             INSERT INTO [{table}] ({columnNames})
             OUTPUT INSERTED.*
@@ -243,7 +303,6 @@ namespace MyApiProject.Controllers.general
             foreach (var prop in data.Properties())
                 command.Parameters.AddWithValue("@" + prop.Name, prop.Value?.ToObject<object>() ?? DBNull.Value);
 
-            // Ejecutar y obtener todos los datos insertados
             await using var reader = await command.ExecuteReaderAsync();
             var insertedData = new Dictionary<string, object>();
 
@@ -257,6 +316,15 @@ namespace MyApiProject.Controllers.general
 
             if (insertedData.Count > 0)
             {
+                // Notificar a todos los clientes sobre el nuevo registro
+                await _hubContext.Clients.Group("PedidosGeneral")
+                    .SendAsync("NuevoRegistro", new
+                    {
+                        Tabla = table,
+                        Registro = insertedData,
+                        Accion = "Insert",
+                        Timestamp = DateTime.UtcNow
+                    });
                 _memoryCache.Remove($"general_all_{table}");
                 return Ok(new { Message = "Registro exitoso", Data = insertedData });
             }
@@ -265,24 +333,18 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Actualización dinámica - CORREGIDO: Devuelve todos los datos actualizados
-        /*[Authorize]*/
+        [Authorize]
         [HttpPut("update/{id}")]
-        public async Task<IActionResult> Actualizar(int id, [FromBody] JObject data, [FromQuery] string? table = "general")
+        public async Task<IActionResult> Actualizar(int id, [FromBody] JObject data, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
             if (data == null) return BadRequest(new { Message = "JSON inválido" });
-
-            /*int userId;
-            try { userId = ObtenerUsuarioId(); }
-            catch (UnauthorizedAccessException ex) { return Unauthorized(new { Message = ex.Message }); }*/
-
             var setClause = string.Join(",", data.Properties().Select(p => $"{p.Name} = @{p.Name}"));
 
-            // Query modificada para devolver todos los campos actualizados
             string query = $@"
             UPDATE {table} 
             SET {setClause} 
             OUTPUT INSERTED.*
-            WHERE id = @Id";
+            WHERE {column} = @Id";
 
             await using var connection = await OpenConnectionAsync();
             await using var command = new SqlCommand(query, connection);
@@ -291,7 +353,6 @@ namespace MyApiProject.Controllers.general
             foreach (var prop in data.Properties())
                 command.Parameters.AddWithValue("@" + prop.Name, prop.Value?.ToObject<object>() ?? DBNull.Value);
 
-            // Ejecutar y obtener todos los datos actualizados
             await using var reader = await command.ExecuteReaderAsync();
             var updatedData = new Dictionary<string, object>();
 
@@ -305,6 +366,21 @@ namespace MyApiProject.Controllers.general
 
             if (updatedData.Count > 0)
             {
+                // Notificar a todos los clientes sobre la actualización
+                await _hubContext.Clients.Group("PedidosGeneral")
+                    .SendAsync("RegistroActualizado", new
+                    {
+                        Tabla = table,
+                        RegistroId = id,
+                        DatosActualizados = updatedData,
+                        Accion = "Update",
+                        Timestamp = DateTime.UtcNow
+                    });
+
+                // Notificar específicamente al grupo del pedido si existe
+                await _hubContext.Clients.Group($"Pedido_{id}")
+                    .SendAsync("PedidoActualizado", updatedData);
+
                 _memoryCache.Remove($"general_{table}_{id}");
                 _memoryCache.Remove($"general_all_{table}");
                 return Ok(new { Message = "Actualización exitosa", Data = updatedData });
@@ -314,21 +390,16 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Eliminación lógica - CORREGIDO: Devuelve los datos antes de archivar
-        /*[Authorize]*/
+        [Authorize]
         [HttpDelete("archivar/{id}")]
-        public async Task<IActionResult> Archivar(int id, [FromQuery] string? table = "general")
+        public async Task<IActionResult> Archivar([FromQuery] int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
-            /*int userId;
-            try { userId = ObtenerUsuarioId(); }
-            catch (UnauthorizedAccessException ex) { return Unauthorized(new { Message = ex.Message }); }*/
-
             // Primero obtener los datos actuales
-            string selectQuery = $"SELECT * FROM {table} WHERE id = @Id";
+            string selectQuery = $"SELECT * FROM {table} WHERE {column} = @Id";
             Dictionary<string, object> originalData = new Dictionary<string, object>();
 
             await using var connection = await OpenConnectionAsync();
 
-            // Obtener datos originales
             await using var selectCommand = new SqlCommand(selectQuery, connection);
             selectCommand.Parameters.AddWithValue("@Id", id);
 
@@ -346,7 +417,7 @@ namespace MyApiProject.Controllers.general
                 return NotFound(new { Message = "Registro no encontrado" });
 
             // Realizar la actualización
-            string updateQuery = $"UPDATE {table} SET estado = 'archivado' WHERE id = @Id";
+            string updateQuery = $"UPDATE {table} SET estado = 'archivado' WHERE {column} = @Id";
             await using var updateCommand = new SqlCommand(updateQuery, connection);
             updateCommand.Parameters.AddWithValue("@Id", id);
 
@@ -354,6 +425,17 @@ namespace MyApiProject.Controllers.general
 
             if (result > 0)
             {
+                // Notificar a todos los clientes sobre el archivado
+                await _hubContext.Clients.Group("PedidosGeneral")
+                    .SendAsync("RegistroArchivado", new
+                    {
+                        Tabla = table,
+                        RegistroId = id,
+                        DatosOriginales = originalData,
+                        Accion = "Archive",
+                        Timestamp = DateTime.UtcNow
+                    });
+
                 _memoryCache.Remove($"general_{table}_{id}");
                 _memoryCache.Remove($"general_all_{table}");
                 return Ok(new
@@ -367,16 +449,12 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Eliminación física - CORREGIDO: Devuelve los datos antes de eliminar
-        /*[Authorize]*/
+        [Authorize]
         [HttpDelete("delete/{id}")]
-        public async Task<IActionResult> Eliminar(int id, [FromQuery] string? table = "general")
+        public async Task<IActionResult> Eliminar(int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
-            /*int userId;
-            try { userId = ObtenerUsuarioId(); }
-            catch (UnauthorizedAccessException ex) { return Unauthorized(new { Message = ex.Message }); }*/
-
             // Primero obtener los datos actuales
-            string selectQuery = $"SELECT * FROM {table} WHERE id = @Id";
+            string selectQuery = $"SELECT * FROM {table} WHERE {column} = @Id";
             Dictionary<string, object> originalData = new Dictionary<string, object>();
 
             await using var connection = await OpenConnectionAsync();
@@ -399,7 +477,7 @@ namespace MyApiProject.Controllers.general
                 return NotFound(new { Message = "Registro no encontrado" });
 
             // Realizar la eliminación
-            string deleteQuery = $"DELETE FROM {table} WHERE id = @Id";
+            string deleteQuery = $"DELETE FROM {table} WHERE {column} = @Id";
             await using var deleteCommand = new SqlCommand(deleteQuery, connection);
             deleteCommand.Parameters.AddWithValue("@Id", id);
 
@@ -407,6 +485,16 @@ namespace MyApiProject.Controllers.general
 
             if (result > 0)
             {
+                // Notificar a todos los clientes sobre el eliminado
+                await _hubContext.Clients.Group("PedidosGeneral")
+                    .SendAsync("RegistroEliminado", new
+                    {
+                        Tabla = table,
+                        RegistroId = id,
+                        DatosOriginales = originalData,
+                        Accion = "Delete",
+                        Timestamp = DateTime.UtcNow
+                    });
                 _memoryCache.Remove($"general_{table}_{id}");
                 _memoryCache.Remove($"general_all_{table}");
                 return Ok(new

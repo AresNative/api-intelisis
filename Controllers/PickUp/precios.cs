@@ -77,7 +77,7 @@ namespace MyApiProject.Controllers.pickUp
                     INNER JOIN ArtUnidad ON CB.Cuenta = ArtUnidad.Articulo 
                     WHERE 
                         ListaPreciosDUnidad.Lista = @ListaPrecio
-                        AND CB.Unidad = ListaPreciosDUnidad.UNIDAD 
+                        --AND CB.Unidad = ListaPreciosDUnidad.UNIDAD 
                         AND CB.Unidad = ArtUnidad.Unidad 
                         AND (CB.Codigo = @Filtro 
                              OR Art.Articulo = @Filtro 
@@ -87,7 +87,7 @@ namespace MyApiProject.Controllers.pickUp
                 FROM Paginado
                 WHERE RowNum BETWEEN @StartRow AND @EndRow;
             ";
-
+            /* 7503029889708 */
             int startRow = ((page - 1) * pageSize) + 1;
             int endRow = page * pageSize;
 
