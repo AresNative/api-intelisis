@@ -93,7 +93,7 @@ namespace MyApiProject.Controllers
                 string? filePath = null;
                 if (file != null)
                 {
-                    var uploadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "Uploads");
+                    var uploadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "uploads");
                     Directory.CreateDirectory(uploadsFolder);
 
                     var fileExtension = Path.GetExtension(file.FileName);
@@ -148,10 +148,10 @@ namespace MyApiProject.Controllers
                 }
 
                 var query = $@"
-            INSERT INTO [{tableName}] ({string.Join(", ", allColumns)})
-            OUTPUT INSERTED.ID
-            VALUES ({string.Join(", ", allParameters)});
-        ";
+                            INSERT INTO [{tableName}] ({string.Join(", ", allColumns)})
+                            OUTPUT INSERTED.ID
+                            VALUES ({string.Join(", ", allParameters)});
+                            ";
 
                 await using var command = new SqlCommand(query, connection);
                 command.Parameters.AddRange(sqlParameters.ToArray());
@@ -220,7 +220,7 @@ namespace MyApiProject.Controllers
         }
         // Métodos agregados
         protected void BuildFilters(FiltrosRequest request, List<string> whereClauses, List<SqlParameter> parameters,
-                    Dictionary<string, int> parameterCounters)
+            Dictionary<string, int> parameterCounters)
         {
             // Filtrar elementos vacíos primero
             var validFiltros = request.Filtros
@@ -268,7 +268,7 @@ namespace MyApiProject.Controllers
                 else
                     parameterCounters[column]++;
 
-                var paramName = $"@{column}_{parameterCounters[column]}";
+                var paramName = $"@{column.Replace(".", "_")}_{parameterCounters[column]}"; // Reemplazar . por _ en parámetros
                 whereClauses.Add($"{column} {operatorClause} {paramName}");
 
                 var paramValue = operatorClause == "LIKE" ? $"%{filter.Value}%" : filter.Value;
@@ -339,8 +339,15 @@ namespace MyApiProject.Controllers
             {
                 foreach (var select in validSelects)
                 {
-                    selectParts.Add(select.Key);
-                    groupByParts.Add(select.Key);
+                    if (!string.IsNullOrWhiteSpace(select.Alias))
+                    {
+                        selectParts.Add($"{select.Key} AS {select.Alias}");
+                    }
+                    else
+                    {
+                        selectParts.Add(select.Key);
+                    }
+                    groupByParts.Add(select.Key);   // 👈 columna original si no hay alias
                 }
             }
 
@@ -386,8 +393,6 @@ namespace MyApiProject.Controllers
 
             // Si no hay selects ni agregaciones, devolver todas las columnas
             string selectClause = selectParts.Any() ? string.Join(", ", selectParts) : "*";
-
-            // Solo agregar GROUP BY si hay columnas normales
             string groupByClause = groupByParts.Any()
                 ? $"GROUP BY {string.Join(", ", groupByParts)}"
                 : "";
@@ -403,7 +408,9 @@ namespace MyApiProject.Controllers
 
             if (validOrders == null || !validOrders.Any())
             {
-                return "ORDER BY id"; // Orden por defecto
+                // Buscar un campo seguro para ordenar por defecto
+                var safeOrderField = FindSafeOrderField(request);
+                return $"ORDER BY {safeOrderField}";
             }
 
             var orderParts = new List<string>();
@@ -412,27 +419,62 @@ namespace MyApiProject.Controllers
             {
                 var direction = !string.IsNullOrWhiteSpace(order.Direction) &&
                                order.Direction.ToUpper() == "DESC" ? "DESC" : "ASC";
+
+                // Usar la clave directamente (ya debe estar calificada con tabla si es necesario)
                 orderParts.Add($"{order.Key} {direction}");
             }
 
             return $"ORDER BY {string.Join(", ", orderParts)}";
         }
+
+        // Método auxiliar para encontrar un campo seguro para ordenar
+        private string FindSafeOrderField(FiltrosRequest request)
+        {
+            // Buscar un campo ID en los selects
+            var idField = request.Selects?
+                .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.Key) &&
+                                   (s.Key.EndsWith(".id") || s.Key.ToLower() == "id"));
+
+            if (idField != null)
+            {
+                return !string.IsNullOrWhiteSpace(idField.Alias) ? idField.Alias : idField.Key;
+            }
+
+            // Buscar cualquier campo en los selects
+            var anyField = request.Selects?
+                .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.Key));
+
+            if (anyField != null)
+            {
+                return !string.IsNullOrWhiteSpace(anyField.Alias) ? anyField.Alias : anyField.Key;
+            }
+
+            // Valor por defecto
+            return "id";
+        }
         protected string GetGroupByColumnsForCount(FiltrosRequest request)
         {
             var selectColumns = request.Selects?
                 .Where(s => !string.IsNullOrWhiteSpace(s.Key))
-                .Select(s => s.Key)
+                .Select(s =>
+                    !string.IsNullOrWhiteSpace(s.Alias)
+                        ? $"{s.Key} AS {s.Alias}"
+                        : s.Key
+                )
                 .ToList();
 
             if (selectColumns != null && selectColumns.Any())
             {
-                // Si hay columnas para GROUP BY, usar DISTINCT
                 return $"DISTINCT {string.Join(", ", selectColumns)}";
             }
             else
             {
-                // Si no hay columnas específicas, usar un campo único
-                return "id";
+                // Buscar un campo ID seguro para el conteo
+                var safeIdField = request.Selects?
+                    .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.Key) &&
+                                       (s.Key.EndsWith(".id") || s.Key == "id"))?.Key ?? "id";
+
+                return safeIdField;
             }
         }
     }

@@ -16,19 +16,17 @@ namespace MyApiProject.Controllers.general
     public partial class GeneralController : BaseController
     {
         private readonly IMemoryCache _memoryCache;
-        private readonly AuthUtils _authUtils;
 
         private readonly IHubContext<GeneralHubs> _hubContext;
 
-        public GeneralController(IConfiguration configuration, IMemoryCache memoryCache, AuthUtils authUtils,
+        public GeneralController(IConfiguration configuration, IMemoryCache memoryCache,
             IHubContext<GeneralHubs> hubContext)
             : base(configuration, memoryCache)
         {
             _memoryCache = memoryCache;
-            _authUtils = authUtils;
             _hubContext = hubContext;
         }
-        [Authorize]
+        /* [Authorize] */
         [HttpOptions("test-cors")]
         public IActionResult TestCors()
         {
@@ -39,7 +37,7 @@ namespace MyApiProject.Controllers.general
             });
         }
         // ✅ Consulta general (sin ID)
-        [Authorize]
+        /* [Authorize] */
         [HttpGet("consultar")]
         public async Task<IActionResult> ConsultarGeneral([FromQuery] string? table = "general")
         {
@@ -89,7 +87,7 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Consulta por ID
-        [Authorize]
+        /* [Authorize] */
         [HttpGet("consultar/{id}")]
         public async Task<IActionResult> ConsultarPorId(int id, [FromQuery] string? table = "general")
         {
@@ -127,7 +125,7 @@ namespace MyApiProject.Controllers.general
             return Ok(results);
         }
 
-        [Authorize]
+        /* [Authorize] */
         [HttpPost("consultar/filtros")]
         public async Task<IActionResult> ConsultarGeneralConFiltros(
             [FromBody] FiltrosRequest request,
@@ -284,7 +282,7 @@ namespace MyApiProject.Controllers.general
 
         // ✅ Registro dinámico con JSON - CORREGIDO: Devuelve todos los datos insertados
         // ✅ Registro dinámico con SignalR
-        [Authorize]
+        /* [Authorize] */
         [HttpPost("register")]
         public async Task<IActionResult> Registrar([FromBody] JObject data, [FromQuery] string? table = "general")
         {
@@ -333,7 +331,7 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Actualización dinámica - CORREGIDO: Devuelve todos los datos actualizados
-        [Authorize]
+        /* [Authorize] */
         [HttpPut("update/{id}")]
         public async Task<IActionResult> Actualizar(int id, [FromBody] JObject data, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
@@ -390,7 +388,7 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Eliminación lógica - CORREGIDO: Devuelve los datos antes de archivar
-        [Authorize]
+        /* [Authorize] */
         [HttpDelete("archivar/{id}")]
         public async Task<IActionResult> Archivar([FromQuery] int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
@@ -449,7 +447,7 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Eliminación física - CORREGIDO: Devuelve los datos antes de eliminar
-        [Authorize]
+        /* [Authorize] */
         [HttpDelete("delete/{id}")]
         public async Task<IActionResult> Eliminar(int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
