@@ -5,7 +5,6 @@ using Microsoft.OpenApi.Models;
 using MyApiProject.Hubs;
 using MyApiProject.Middleware;
 using System.Text;
-using MyApiProject.Attributes;
 
 var builder = WebApplication.CreateBuilder(args);
 var configuration = builder.Configuration;
@@ -127,8 +126,7 @@ app.UseSwaggerUI(c =>
     }
     c.RoutePrefix = string.Empty; // Acceso a Swagger en la raíz
 });
-// Para Middleware (Opción 1)
-app.UseMiddleware<TokenValidationMiddleware>();
+
 app.UseCors("AllowedCorsOrigins");
 app.UseRouting();
 app.UseAuthentication();

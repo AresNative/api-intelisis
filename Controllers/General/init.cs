@@ -38,8 +38,8 @@ namespace MyApiProject.Controllers.general
             });
         }
         // ✅ Consulta general (sin ID)
-        [ValidateToken] // ← Protege solo este endpoint
         [HttpGet("consultar")]
+        [ValidateToken] // ← Protege solo este endpoint
         public async Task<IActionResult> ConsultarGeneral([FromQuery] string? table = "general")
         {
             string cacheKey = $"general_all_{table}";
@@ -88,8 +88,8 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Consulta por ID
-        [ValidateToken] // ← Protege solo este endpoint
         [HttpGet("consultar/{id}")]
+        [ValidateToken] // ← Protege solo este endpoint
         public async Task<IActionResult> ConsultarPorId(int id, [FromQuery] string? table = "general")
         {
             string cacheKey = $"general_{table}_{id}";
@@ -126,7 +126,6 @@ namespace MyApiProject.Controllers.general
             return Ok(results);
         }
 
-        [ValidateToken] // ← Protege solo este endpoint
         [HttpPost("consultar/filtros")]
         public async Task<IActionResult> ConsultarGeneralConFiltros(
            [FromBody] FiltrosRequest request,
@@ -283,8 +282,8 @@ namespace MyApiProject.Controllers.general
 
         // ✅ Registro dinámico con JSON - CORREGIDO: Devuelve todos los datos insertados
         // ✅ Registro dinámico con SignalR
-        [ValidateToken] // ← Protege solo este endpoint
         [HttpPost("register")]
+        [ValidateToken] // ← Protege solo este endpoint
         public async Task<IActionResult> Registrar([FromBody] JObject data, [FromQuery] string? table = "general")
         {
             if (data == null) return BadRequest(new { Message = "JSON inválido" });
@@ -332,8 +331,8 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Actualización dinámica - CORREGIDO: Devuelve todos los datos actualizados
-        [ValidateToken] // ← Protege solo este endpoint
         [HttpPut("update/{id}")]
+        [ValidateToken] // ← Protege solo este endpoint
         public async Task<IActionResult> Actualizar(int id, [FromBody] JObject data, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
             if (data == null) return BadRequest(new { Message = "JSON inválido" });
@@ -389,8 +388,8 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Eliminación lógica - CORREGIDO: Devuelve los datos antes de archivar
-        [ValidateToken] // ← Protege solo este endpoint
         [HttpDelete("archivar/{id}")]
+        [ValidateToken] // ← Protege solo este endpoint
         public async Task<IActionResult> Archivar(int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
             // Primero obtener los datos actuales
@@ -448,8 +447,8 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Eliminación física - CORREGIDO: Devuelve los datos antes de eliminar
-        [ValidateToken] // ← Protege solo este endpoint
         [HttpDelete("delete/{id}")]
+        [ValidateToken] // ← Protege solo este endpoint
         public async Task<IActionResult> Eliminar(int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
             // Primero obtener los datos actuales
