@@ -78,7 +78,7 @@ namespace MyApiProject.Controllers.pickUp
                     WHERE 
                         ListaPreciosDUnidad.Lista = @ListaPrecio
                         --AND CB.Unidad = ListaPreciosDUnidad.UNIDAD 
-                        AND CB.Unidad = ArtUnidad.Unidad 
+                        --AND CB.Unidad = ArtUnidad.Unidad 
                         AND (CB.Codigo = @Filtro 
                              OR Art.Articulo = @Filtro 
                              OR Art.Descripcion1 LIKE '%' + @Filtro + '%')

@@ -7,6 +7,7 @@ using Microsoft.Extensions.Caching.Memory;
 using MyApiProject.Models;
 using Microsoft.AspNetCore.SignalR;
 using MyApiProject.Hubs;
+using MyApiProject.Attributes;
 
 namespace MyApiProject.Controllers.general
 {
@@ -26,7 +27,7 @@ namespace MyApiProject.Controllers.general
             _memoryCache = memoryCache;
             _hubContext = hubContext;
         }
-        /* [Authorize] */
+        [ValidateToken] // ← Protege solo este endpoint
         [HttpOptions("test-cors")]
         public IActionResult TestCors()
         {
@@ -37,7 +38,7 @@ namespace MyApiProject.Controllers.general
             });
         }
         // ✅ Consulta general (sin ID)
-        /* [Authorize] */
+        [ValidateToken] // ← Protege solo este endpoint
         [HttpGet("consultar")]
         public async Task<IActionResult> ConsultarGeneral([FromQuery] string? table = "general")
         {
@@ -87,7 +88,7 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Consulta por ID
-        /* [Authorize] */
+        [ValidateToken] // ← Protege solo este endpoint
         [HttpGet("consultar/{id}")]
         public async Task<IActionResult> ConsultarPorId(int id, [FromQuery] string? table = "general")
         {
@@ -125,13 +126,13 @@ namespace MyApiProject.Controllers.general
             return Ok(results);
         }
 
-        /* [Authorize] */
+        [ValidateToken] // ← Protege solo este endpoint
         [HttpPost("consultar/filtros")]
         public async Task<IActionResult> ConsultarGeneralConFiltros(
-            [FromBody] FiltrosRequest request,
-            [FromQuery] string? table = "general",
-            [FromQuery] int page = 1,
-            [FromQuery] int pageSize = 10)
+           [FromBody] FiltrosRequest request,
+           [FromQuery] string? table = "general",
+           [FromQuery] int page = 1,
+           [FromQuery] int pageSize = 10)
         {
             if (page <= 0) page = 1;
             if (pageSize <= 0) pageSize = 10;
@@ -282,7 +283,7 @@ namespace MyApiProject.Controllers.general
 
         // ✅ Registro dinámico con JSON - CORREGIDO: Devuelve todos los datos insertados
         // ✅ Registro dinámico con SignalR
-        /* [Authorize] */
+        [ValidateToken] // ← Protege solo este endpoint
         [HttpPost("register")]
         public async Task<IActionResult> Registrar([FromBody] JObject data, [FromQuery] string? table = "general")
         {
@@ -331,7 +332,7 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Actualización dinámica - CORREGIDO: Devuelve todos los datos actualizados
-        /* [Authorize] */
+        [ValidateToken] // ← Protege solo este endpoint
         [HttpPut("update/{id}")]
         public async Task<IActionResult> Actualizar(int id, [FromBody] JObject data, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
@@ -388,9 +389,9 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Eliminación lógica - CORREGIDO: Devuelve los datos antes de archivar
-        /* [Authorize] */
+        [ValidateToken] // ← Protege solo este endpoint
         [HttpDelete("archivar/{id}")]
-        public async Task<IActionResult> Archivar([FromQuery] int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
+        public async Task<IActionResult> Archivar(int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
             // Primero obtener los datos actuales
             string selectQuery = $"SELECT * FROM {table} WHERE {column} = @Id";
@@ -447,7 +448,7 @@ namespace MyApiProject.Controllers.general
         }
 
         // ✅ Eliminación física - CORREGIDO: Devuelve los datos antes de eliminar
-        /* [Authorize] */
+        [ValidateToken] // ← Protege solo este endpoint
         [HttpDelete("delete/{id}")]
         public async Task<IActionResult> Eliminar(int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
