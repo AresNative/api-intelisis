@@ -87,7 +87,6 @@ namespace MyApiProject.Controllers.pickUp
                 FROM Paginado
                 WHERE RowNum BETWEEN @StartRow AND @EndRow;
             ";
-            /* 7503029889708 */
             int startRow = ((page - 1) * pageSize) + 1;
             int endRow = page * pageSize;
 
