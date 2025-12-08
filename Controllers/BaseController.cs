@@ -1,4 +1,5 @@
 // Controllers/BaseController.cs
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Caching.Memory;
@@ -477,5 +478,312 @@ namespace MyApiProject.Controllers
                 return safeIdField;
             }
         }
+
+        // En BaseController.cs, agrega estos métodos mínimos
+        protected async Task<SqlConnection> OpenConnectionAsync(int timeoutSeconds = 30)
+        {
+            var csb = new SqlConnectionStringBuilder(_connectionString)
+            {
+                CommandTimeout = timeoutSeconds
+            };
+
+            var connection = new SqlConnection(csb.ConnectionString);
+            await connection.OpenAsync();
+            return connection;
+        }
+
+        // Método simplificado para construir SELECT
+        protected (string selectClause, string groupByClause) BuildDynamicSelectClause(FiltrosRequest request)
+        {
+            var selectParts = new List<string>();
+            var groupByParts = new List<string>();
+
+            // Columnas simples
+            foreach (var select in request.Selects.Where(s => !string.IsNullOrEmpty(s.Key)))
+            {
+                var column = select.Key.Contains('.') ? select.Key : $"t0.{select.Key}";
+                var alias = !string.IsNullOrEmpty(select.Alias) ? $" AS {select.Alias}" : "";
+                selectParts.Add($"{column}{alias}");
+                groupByParts.Add(column);
+            }
+
+            // Agregaciones
+            foreach (var agg in request.Agregaciones.Where(a => !string.IsNullOrEmpty(a.Key)))
+            {
+                var column = agg.Key.Contains('.') ? agg.Key : $"t0.{agg.Key}";
+                var operation = GetSafeAggregation(agg.Operation);
+                var alias = !string.IsNullOrEmpty(agg.Alias) ? $" AS {agg.Alias}" : "";
+
+                if (operation == "DISTINCT")
+                    selectParts.Add($"DISTINCT {column}{alias}");
+                else
+                    selectParts.Add($"{operation}({column}){alias}");
+            }
+
+            string selectClause = selectParts.Any() ? string.Join(", ", selectParts) : "t0.*";
+            string groupByClause = groupByParts.Any() ? $"GROUP BY {string.Join(", ", groupByParts)}" : "";
+
+            return (selectClause, groupByClause);
+        }
+
+        private string GetSafeAggregation(string operation)
+        {
+            var validOps = new[] { "SUM", "COUNT", "AVG", "MIN", "MAX", "DISTINCT" };
+            return validOps.Contains(operation?.ToUpper()) ? operation.ToUpper() : "SUM";
+        }
+
+        protected async Task<(List<Dictionary<string, object>> Data, long TotalRecords)>
+    ExecutePaginatedQueryAsync(
+        FiltrosRequest request,
+        string table,
+        string whereQuery,
+        List<SqlParameter> parameters,
+        string selectClause,
+        string groupByClause,
+        string orderByClause,
+        int page,
+        int pageSize)
+        {
+            int offset = (page - 1) * pageSize;
+
+            // Calcular total de registros de manera más eficiente
+            long totalRecords = await GetTotalRecordsAsync(table, whereQuery, parameters, groupByClause);
+
+            // Construir query con ROW_NUMBER para mejor rendimiento
+            var paginatedQuery = BuildPaginatedQueryWithRowNumber(
+                selectClause,
+                table,
+                whereQuery,
+                groupByClause,
+                orderByClause,
+                offset,
+                pageSize);
+
+            await using var connection = await OpenConnectionAsync(180); // Timeout de 3 minutos
+
+            var paginatedParameters = parameters
+                .Select(p => new SqlParameter(p.ParameterName, p.Value))
+                .ToList();
+
+            paginatedParameters.Add(new SqlParameter("@Offset", offset));
+            paginatedParameters.Add(new SqlParameter("@PageSize", pageSize));
+
+            await using var command = new SqlCommand(paginatedQuery, connection);
+            command.CommandTimeout = 180; // 3 minutos
+            command.Parameters.AddRange(paginatedParameters.ToArray());
+
+            var results = new List<Dictionary<string, object>>();
+
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var row = new Dictionary<string, object>();
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    row[reader.GetName(i)] = reader.GetValue(i);
+                }
+                results.Add(row);
+            }
+
+            return (results, totalRecords);
+        }
+
+        private async Task<long> GetTotalRecordsAsync(
+            string table,
+            string whereQuery,
+            List<SqlParameter> parameters,
+            string groupByClause)
+        {
+            try
+            {
+                await using var connection = await OpenConnectionAsync(60);
+
+                string countQuery;
+
+                if (string.IsNullOrEmpty(groupByClause))
+                {
+                    // Conteo simple para tablas individuales
+                    if (!table.ToUpper().Contains("JOIN"))
+                    {
+                        countQuery = $@"
+                    SELECT COUNT_BIG(*) as Total 
+                    FROM {table}
+                    {whereQuery}";
+                    }
+                    else
+                    {
+                        // Para consultas con JOIN, usamos una subquery
+                        countQuery = $@"
+                    SELECT COUNT_BIG(*) as Total 
+                    FROM (
+                        SELECT DISTINCT {GetPrimaryKeyForTable(table)}
+                        FROM {table}
+                        {whereQuery}
+                    ) as SubQuery";
+                    }
+                }
+                else
+                {
+                    // Para GROUP BY, contamos las filas agrupadas
+                    countQuery = $@"
+                SELECT COUNT_BIG(*) as Total 
+                FROM (
+                    SELECT 1
+                    FROM {table}
+                    {whereQuery}
+                    {groupByClause}
+                ) as GroupedQuery";
+                }
+
+                await using var command = new SqlCommand(countQuery, connection);
+                command.Parameters.AddRange(parameters.ToArray());
+
+                var result = await command.ExecuteScalarAsync();
+                return Convert.ToInt64(result);
+            }
+            catch (Exception)
+            {
+                // Si falla el conteo exacto, devolver estimación
+                return await GetEstimatedRowCountAsync(table);
+            }
+        }
+
+        private async Task<long> GetEstimatedRowCountAsync(string table)
+        {
+            try
+            {
+                // Extraer la tabla principal de la consulta
+                string mainTable = ExtractMainTable(table);
+
+                await using var connection = await OpenConnectionAsync(30);
+
+                string estimateQuery = @"
+            SELECT SUM(row_count) as estimated_total
+            FROM sys.dm_db_partition_stats 
+            WHERE object_id = OBJECT_ID(@TableName) 
+            AND index_id IN (0, 1)";
+
+                await using var command = new SqlCommand(estimateQuery, connection);
+                command.Parameters.AddWithValue("@TableName", mainTable);
+
+                var result = await command.ExecuteScalarAsync();
+                return result != DBNull.Value ? Convert.ToInt64(result) : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private string ExtractMainTable(string fromClause)
+        {
+            // Extraer la tabla principal del FROM clause
+            // Ejemplo: "VENTAD AS INVD INNER JOIN VENTA AS INV ..." → "VENTAD"
+            var firstSpaceIndex = fromClause.IndexOf(' ');
+            if (firstSpaceIndex > 0)
+            {
+                return fromClause.Substring(0, firstSpaceIndex).Trim();
+            }
+            return fromClause.Trim();
+        }
+
+        private string GetPrimaryKeyForTable(string table)
+        {
+            // Determinar la clave primaria basada en la tabla
+            var tableLower = table.ToLower();
+
+            if (tableLower.Contains("ventad") || tableLower.Contains("invd"))
+                return "INVD.ID";
+            else if (tableLower.Contains("venta") || tableLower.Contains("inv"))
+                return "INV.ID";
+            else if (tableLower.Contains("art"))
+                return "ART.Articulo";
+            else if (tableLower.Contains("cte"))
+                return "C.Cliente";
+
+            return "id"; // Default
+        }
+
+        private string BuildPaginatedQueryWithRowNumber(
+            string selectClause,
+            string table,
+            string whereQuery,
+            string groupByClause,
+            string orderByClause,
+            int offset,
+            int pageSize)
+        {
+            // Asegurar un ORDER BY seguro
+            string safeOrderBy = GetSafeOrderByForRowNumber(orderByClause, selectClause);
+
+            var query = new StringBuilder();
+
+            if (string.IsNullOrEmpty(groupByClause))
+            {
+                query.AppendLine($@"
+            WITH PaginatedData AS (
+                SELECT 
+                    {selectClause},
+                    ROW_NUMBER() OVER (ORDER BY {safeOrderBy}) AS RowNum
+                FROM {table}
+                {whereQuery}
+            )
+            SELECT * FROM PaginatedData
+            WHERE RowNum > @Offset AND RowNum <= @Offset + @PageSize
+            ORDER BY RowNum");
+            }
+            else
+            {
+                query.AppendLine($@"
+            WITH GroupedData AS (
+                SELECT 
+                    {selectClause}
+                FROM {table}
+                {whereQuery}
+                {groupByClause}
+            ),
+            PaginatedData AS (
+                SELECT 
+                    *,
+                    ROW_NUMBER() OVER (ORDER BY {safeOrderBy}) AS RowNum
+                FROM GroupedData
+            )
+            SELECT * FROM PaginatedData
+            WHERE RowNum > @Offset AND RowNum <= @Offset + @PageSize
+            ORDER BY RowNum");
+            }
+
+            return query.ToString();
+        }
+
+        private string GetSafeOrderByForRowNumber(string orderByClause, string selectClause)
+        {
+            if (!string.IsNullOrEmpty(orderByClause) && orderByClause.StartsWith("ORDER BY "))
+            {
+                return orderByClause.Substring(9); // Remover "ORDER BY "
+            }
+
+            // Buscar una columna segura para ordenar
+            var safeColumns = new[] { "id", "ID", "fecha", "Fecha", "fechaemision", "FechaEmision" };
+
+            foreach (var col in safeColumns)
+            {
+                if (selectClause.Contains(col))
+                    return col;
+            }
+
+            // Extraer la primera columna del SELECT
+            var firstColumn = selectClause.Split(',')[0].Trim();
+            var aliasIndex = firstColumn.IndexOf(" AS ", StringComparison.OrdinalIgnoreCase);
+
+            if (aliasIndex > 0)
+            {
+                return firstColumn.Substring(aliasIndex + 4).Trim(); // Usar el alias
+            }
+
+            return firstColumn;
+        }
     }
+
+
 }

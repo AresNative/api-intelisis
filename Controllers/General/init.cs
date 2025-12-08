@@ -279,8 +279,6 @@ namespace MyApiProject.Controllers.general
                 return StatusCode(500, new { Message = "Error interno del servidor", Details = ex.Message, counter = countQuery, query = paginatedQuery });
             }
         }
-
-        // ✅ Registro dinámico con JSON - CORREGIDO: Devuelve todos los datos insertados
         // ✅ Registro dinámico con SignalR
         [HttpPost("register")]
         [ValidateToken] // ← Protege solo este endpoint
@@ -299,7 +297,6 @@ namespace MyApiProject.Controllers.general
 
                 var query = $@"
                     INSERT INTO {table} ({columnNames})
-                    OUTPUT INSERTED.*
                     VALUES ({parameterNames});";
 
                 Console.WriteLine($"Query: {query}");
@@ -320,36 +317,15 @@ namespace MyApiProject.Controllers.general
                 await using var reader = await command.ExecuteReaderAsync();
                 Console.WriteLine("Consulta ejecutada");
 
-                var insertedData = new Dictionary<string, object>();
-
-                if (await reader.ReadAsync())
-                {
-                    for (int i = 0; i < reader.FieldCount; i++)
+                await _hubContext.Clients.Group("PedidosGeneral")
+                    .SendAsync("NuevoRegistro", new
                     {
-                        insertedData[reader.GetName(i)] = reader.GetValue(i);
-                    }
-                    Console.WriteLine($"Datos insertados: {System.Text.Json.JsonSerializer.Serialize(insertedData)}");
-                }
-                else
-                {
-                    Console.WriteLine("No se pudo leer los datos insertados");
-                }
-
-                if (insertedData.Count > 0)
-                {
-                    await _hubContext.Clients.Group("PedidosGeneral")
-                        .SendAsync("NuevoRegistro", new
-                        {
-                            Tabla = table,
-                            Registro = insertedData,
-                            Accion = "Insert",
-                            Timestamp = DateTime.UtcNow
-                        });
-                    _memoryCache.Remove($"general_all_{table}");
-                    return Ok(new { Message = "Registro exitoso", Data = insertedData });
-                }
-
-                return StatusCode(500, new { Message = "Error al insertar el registro - no se obtuvieron datos de retorno" });
+                        Tabla = table,
+                        Accion = "Insert",
+                        Timestamp = DateTime.UtcNow
+                    });
+                _memoryCache.Remove($"general_all_{table}");
+                return Ok(new { Message = "Registro exitoso", Data = reader });
             }
             catch (SqlException sqlEx)
             {
@@ -396,7 +372,6 @@ namespace MyApiProject.Controllers.general
             string query = $@"
             UPDATE {table} 
             SET {setClause} 
-            OUTPUT INSERTED.*
             WHERE {column} = @Id";
 
             await using var connection = await OpenConnectionAsync();
@@ -407,45 +382,36 @@ namespace MyApiProject.Controllers.general
                 command.Parameters.AddWithValue("@" + prop.Name, prop.Value?.ToObject<object>() ?? DBNull.Value);
 
             await using var reader = await command.ExecuteReaderAsync();
-            var updatedData = new Dictionary<string, object>();
 
-            if (await reader.ReadAsync())
-            {
-                for (int i = 0; i < reader.FieldCount; i++)
+            // Notificar a todos los clientes sobre la actualización
+            await _hubContext.Clients.Group("PedidosGeneral")
+                .SendAsync("RegistroActualizado", new
                 {
-                    updatedData[reader.GetName(i)] = reader.GetValue(i);
-                }
-            }
+                    Tabla = table,
+                    RegistroId = id,
+                    Accion = "Update",
+                    Timestamp = DateTime.UtcNow
+                });
 
-            if (updatedData.Count > 0)
-            {
-                // Notificar a todos los clientes sobre la actualización
-                await _hubContext.Clients.Group("PedidosGeneral")
-                    .SendAsync("RegistroActualizado", new
-                    {
-                        Tabla = table,
-                        RegistroId = id,
-                        DatosActualizados = updatedData,
-                        Accion = "Update",
-                        Timestamp = DateTime.UtcNow
-                    });
+            // Notificar específicamente al grupo del pedido si existe
+            await _hubContext.Clients.Group($"Pedido_{id}")
+                .SendAsync("PedidoActualizado", new
+                {
+                    Tabla = table,
+                    RegistroId = id,
+                    Accion = "Update",
+                    Timestamp = DateTime.UtcNow
+                });
 
-                // Notificar específicamente al grupo del pedido si existe
-                await _hubContext.Clients.Group($"Pedido_{id}")
-                    .SendAsync("PedidoActualizado", updatedData);
-
-                _memoryCache.Remove($"general_{table}_{id}");
-                _memoryCache.Remove($"general_all_{table}");
-                return Ok(new { Message = "Actualización exitosa", Data = updatedData });
-            }
-
-            return NotFound(new { Message = "Registro no encontrado" });
+            _memoryCache.Remove($"general_{table}_{id}");
+            _memoryCache.Remove($"general_all_{table}");
+            return Ok(new { Message = "Actualización exitosa", Data = reader });
         }
 
         // ✅ Eliminación lógica - CORREGIDO: Devuelve los datos antes de archivar
         [HttpDelete("archivar/{id}")]
         [ValidateToken] // ← Protege solo este endpoint
-        public async Task<IActionResult> Archivar(int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
+        public async Task<IActionResult> Archivar(string id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
             // Primero obtener los datos actuales
             string selectQuery = $"SELECT * FROM {table} WHERE {column} = @Id";
@@ -504,7 +470,7 @@ namespace MyApiProject.Controllers.general
         // ✅ Eliminación física - CORREGIDO: Devuelve los datos antes de eliminar
         [HttpDelete("delete/{id}")]
         [ValidateToken] // ← Protege solo este endpoint
-        public async Task<IActionResult> Eliminar(int id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
+        public async Task<IActionResult> Eliminar(string id, [FromQuery] string? column = "id", [FromQuery] string? table = "general")
         {
             // Primero obtener los datos actuales
             string selectQuery = $"SELECT * FROM {table} WHERE {column} = @Id";

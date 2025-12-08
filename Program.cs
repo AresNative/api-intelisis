@@ -70,9 +70,10 @@ builder.Services.AddMemoryCache(); // Esto es necesario para resolver IMemoryCac
 builder.Services.AddSignalR();
 var swaggerGroups = new[]
 {
-    new { Name = "general", Title = "Intelisis - Mercdos Mejia | AresNative" },
+    new { Name = "general", Title = "Intelisis - Mercados Mejia by AresNative" },
     new { Name = "reporteria",   Title = "Reporteria" },
     new { Name = "pickUp",   Title = "PickUp" },
+    new { Name = "masivo",   Title = "Masivo" },
 };
 // Configuración de Swagger con seguridad JWT optimizada
 builder.Services.AddEndpointsApiExplorer();
