@@ -49,22 +49,6 @@ namespace MyApiProject.Controllers
             {
                 // OPTIMIZACIÓN 1: Cache de consultas complejas
                 var cacheKey = GenerateCacheKey(request, table, page, pageSize);
-                /* if (_memoryCache.TryGetValue(cacheKey, out List<Dictionary<string, object>>? cachedData))
-                {
-                    // Obtener total aproximado del cache si existe
-                    var totalKey = $"{cacheKey}_total";
-                    _memoryCache.TryGetValue(totalKey, out long totalRecords);
-
-                    return Ok(new
-                    {
-                        PageSize = pageSize,
-                        Page = page,
-                        TotalRecords = totalRecords,
-                        TotalPages = (int)Math.Ceiling((double)totalRecords / pageSize),
-                        Data = cachedData,
-                        FromCache = true
-                    });
-                } */
 
                 // OPTIMIZACIÓN 2: Determinar estrategia de consulta basada en filtros
                 var queryStrategy = DetermineQueryStrategy(request, table);
@@ -120,7 +104,7 @@ namespace MyApiProject.Controllers
                     PageSize = pageSize,
                     Page = page,
                     TotalRecords = totalRecordsResult,
-                    TotalPages = (int)Math.Ceiling((double)totalRecordsResult / pageSize),
+                    TotalPages = (totalRecordsResult / pageSize),
                     Data = results,
                     QueryStrategy = queryStrategy.ToString(),
                     FromCache = false
@@ -479,24 +463,30 @@ namespace MyApiProject.Controllers
         }
 
         private async Task<(List<Dictionary<string, object>> Data, long TotalRecords)>
-            ExecuteOptimizedPaginatedQueryAsync(
-                FiltrosRequest request,
-                string table,
-                string whereQuery,
-                List<SqlParameter> parameters,
-                string selectClause,
-                string groupByClause,
-                string orderByClause,
-                int page,
-                int pageSize,
-                QueryStrategy strategy)
+     ExecuteOptimizedPaginatedQueryAsync(
+         FiltrosRequest request,
+         string table,
+         string whereQuery,
+         List<SqlParameter> parameters,
+         string selectClause,
+         string groupByClause,
+         string orderByClause,
+         int page,
+         int pageSize,
+         QueryStrategy strategy)
         {
             int offset = (page - 1) * pageSize;
 
+            // Crear copias de los parámetros para evitar conflictos
+            var countParameters = parameters.Select(p =>
+                new SqlParameter(p.ParameterName, p.Value)).ToList();
+            var dataParameters = parameters.Select(p =>
+                new SqlParameter(p.ParameterName, p.Value)).ToList();
+
             // OPTIMIZACIÓN: Ejecutar conteo en paralelo si es necesario
             var countTask = strategy == QueryStrategy.ApproximateCount
-                ? GetApproximateCountAsync(table, whereQuery, parameters)
-                : GetOptimizedTotalRecordsAsync(table, whereQuery, parameters, groupByClause);
+                ? GetApproximateCountAsync(table, whereQuery, countParameters)
+                : GetOptimizedTotalRecordsAsync(table, whereQuery, countParameters, groupByClause);
 
             // Construir query optimizada
             string paginatedQuery;
@@ -511,8 +501,8 @@ namespace MyApiProject.Controllers
                     selectClause, table, whereQuery, groupByClause, orderByClause, offset, pageSize);
             }
 
-            // Ejecutar consulta de datos
-            var dataTask = ExecuteDataQueryAsync(paginatedQuery, parameters, offset, pageSize, strategy);
+            // Ejecutar consulta de datos con parámetros separados
+            var dataTask = ExecuteDataQueryAsync(paginatedQuery, dataParameters, offset, pageSize, strategy);
 
             // Esperar ambas tareas
             await Task.WhenAll(countTask, dataTask);
@@ -551,10 +541,10 @@ namespace MyApiProject.Controllers
         }
 
         private async Task<long> GetOptimizedTotalRecordsAsync(
-            string table,
-            string whereQuery,
-            List<SqlParameter> parameters,
-            string groupByClause)
+    string table,
+    string whereQuery,
+    List<SqlParameter> parameters,
+    string groupByClause)
         {
             try
             {
@@ -564,12 +554,17 @@ namespace MyApiProject.Controllers
                 if (string.IsNullOrEmpty(groupByClause) && !table.ToUpper().Contains("JOIN"))
                 {
                     string countQuery = $@"
-                        SELECT COUNT_BIG(*) 
-                        FROM {table}
-                        {whereQuery}";
+                SELECT COUNT_BIG(*) 
+                FROM {table}
+                {whereQuery}";
 
                     await using var command = new SqlCommand(countQuery, connection);
-                    command.Parameters.AddRange(parameters.ToArray());
+
+                    // Usar AddWithValue para evitar conflictos de colección
+                    foreach (var param in parameters)
+                    {
+                        command.Parameters.AddWithValue(param.ParameterName, param.Value);
+                    }
 
                     var result = await command.ExecuteScalarAsync();
                     return Convert.ToInt64(result);
@@ -647,11 +642,11 @@ namespace MyApiProject.Controllers
         }
 
         private async Task<List<Dictionary<string, object>>> ExecuteDataQueryAsync(
-            string query,
-            List<SqlParameter> parameters,
-            int offset,
-            int pageSize,
-            QueryStrategy strategy)
+     string query,
+     List<SqlParameter> parameters,
+     int offset,
+     int pageSize,
+     QueryStrategy strategy)
         {
             var results = new List<Dictionary<string, object>>();
 
@@ -663,19 +658,48 @@ namespace MyApiProject.Controllers
                 await using var command = new SqlCommand(query, connection);
                 command.CommandTimeout = strategy == QueryStrategy.ApproximateCount ? 60 : 180;
 
-                // Agregar parámetros específicos de paginación
+                // PRIMERO añadir todos los parámetros de filtro
+                if (parameters != null && parameters.Count > 0)
+                {
+                    // Usar copia de los parámetros para evitar duplicados
+                    foreach (var param in parameters)
+                    {
+                        // Verificar si el parámetro ya existe antes de añadirlo
+                        if (!command.Parameters.Contains(param.ParameterName))
+                        {
+                            command.Parameters.AddWithValue(param.ParameterName, param.Value);
+                        }
+                        else
+                        {
+                            // Si ya existe, actualizar el valor
+                            command.Parameters[param.ParameterName].Value = param.Value;
+                        }
+                    }
+                }
+
+                // LUEGO añadir parámetros específicos de paginación solo si no existen
                 if (strategy == QueryStrategy.KeysetPagination)
                 {
-                    command.Parameters.AddWithValue("@LastKey", offset * pageSize);
+                    var lastKeyParamName = "@LastKey";
+                    if (!command.Parameters.Contains(lastKeyParamName))
+                    {
+                        command.Parameters.AddWithValue(lastKeyParamName, offset * pageSize);
+                    }
                 }
                 else
                 {
-                    command.Parameters.AddWithValue("@Offset", offset);
-                    command.Parameters.AddWithValue("@PageSize", pageSize);
-                }
+                    var offsetParamName = "@Offset";
+                    var pageSizeParamName = "@PageSize";
 
-                // Agregar parámetros de filtro
-                command.Parameters.AddRange(parameters.ToArray());
+                    if (!command.Parameters.Contains(offsetParamName))
+                    {
+                        command.Parameters.AddWithValue(offsetParamName, offset);
+                    }
+                    if (!command.Parameters.Contains(pageSizeParamName))
+                    {
+                        command.Parameters.AddWithValue(pageSizeParamName, pageSize);
+                    }
+                }
 
                 await using var reader = await command.ExecuteReaderAsync();
 
@@ -707,14 +731,25 @@ namespace MyApiProject.Controllers
         }
 
         private async Task<List<Dictionary<string, object>>> ExecuteFallbackQueryAsync(
-            string query, List<SqlParameter> parameters)
+    string query, List<SqlParameter> parameters)
         {
             var results = new List<Dictionary<string, object>>();
 
             await using var connection = await OpenConnectionAsync(30);
             await using var command = new SqlCommand(query, connection);
             command.CommandTimeout = 30;
-            command.Parameters.AddRange(parameters.ToArray());
+
+            // Evitar duplicados en fallback también
+            if (parameters != null && parameters.Count > 0)
+            {
+                foreach (var param in parameters)
+                {
+                    if (!command.Parameters.Contains(param.ParameterName))
+                    {
+                        command.Parameters.AddWithValue(param.ParameterName, param.Value);
+                    }
+                }
+            }
 
             await using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
