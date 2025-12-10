@@ -1,278 +1,222 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Data.SqlClient;
-using Microsoft.AspNetCore.Authorization;
-using Newtonsoft.Json.Linq;
 using Microsoft.Extensions.Caching.Memory;
 using MyApiProject.Models;
-using Microsoft.AspNetCore.SignalR;
-using MyApiProject.Hubs;
-using MyApiProject.Attributes;
-using System.Text.RegularExpressions;
+using System.Data;
+using System.Text;
 
 namespace MyApiProject.Controllers
 {
     [ApiExplorerSettings(GroupName = "masivo")]
     [Route("api/v2/masivo")]
     [ApiController]
-    public class MasivoController : BaseController
+    public class MasivoController : ControllerBase
     {
         private readonly IMemoryCache _memoryCache;
         private readonly IConfiguration _configuration;
-        private readonly IHubContext<GeneralHubs> _hubContext;
+        private readonly string _connectionString;
 
-        public MasivoController(IConfiguration configuration, IMemoryCache memoryCache,
-            IHubContext<GeneralHubs> hubContext)
-            : base(configuration, memoryCache)
+        public MasivoController(IConfiguration configuration, IMemoryCache memoryCache)
         {
-            _memoryCache = memoryCache;
             _configuration = configuration;
-            _hubContext = hubContext;
+            _memoryCache = memoryCache;
+            _connectionString = configuration.GetConnectionString("DefaultConnection");
         }
 
         [HttpPost("consultar")]
         public async Task<IActionResult> ConsultarGeneralConFiltros(
-                                        [FromBody] FiltrosRequest request,
-                                        [FromQuery] string? table = "general",
-                                        [FromQuery] int page = 1,
-                                        [FromQuery] int pageSize = 10)
+            [FromBody] FiltrosRequest request,
+            [FromQuery] string? table = "general",
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 50)
         {
-            // Validaciones iniciales
+            // Validaciones
             if (request == null)
                 return BadRequest(new { Message = "Request no puede ser nulo" });
 
-            // Validar y ajustar límites
-            if (pageSize < 1) pageSize = 10;
+            if (pageSize < 1) pageSize = 50;
+            if (pageSize > 1000) pageSize = 1000;
             if (page < 1) page = 1;
 
             try
             {
-                // OPTIMIZACIÓN 1: Cache de consultas complejas
-                var cacheKey = GenerateCacheKey(request, table, page, pageSize);
+                // Cache simple
+                var cacheKey = GenerateSimpleCacheKey(request, table, page, pageSize);
+                if (_memoryCache.TryGetValue(cacheKey, out object cached))
+                {
+                    return Ok(cached);
+                }
 
-                // OPTIMIZACIÓN 2: Determinar estrategia de consulta basada en filtros
-                var queryStrategy = DetermineQueryStrategy(request, table);
+                int offset = (page - 1) * pageSize;
 
-                // Construir cláusulas optimizadas
-                var (selectClause, groupByClause) = BuildOptimizedSelectClause(request, queryStrategy);
+                // Construir SELECT y GROUP BY
+                var (selectClause, groupByClause) = BuildCorrectSelectClause(request);
 
+                // Construir WHERE
                 var whereClauses = new List<string>();
                 var parameters = new List<SqlParameter>();
-                var parameterCounters = new Dictionary<string, int>();
 
-                // OPTIMIZACIÓN 3: Procesar filtros con optimizaciones
-                BuildOptimizedFilters(request, whereClauses, parameters, parameterCounters, queryStrategy);
+                BuildSimpleFilters(request, whereClauses, parameters);
 
-                // Agrupar condiciones
-                var groupedWhereClauses = AgruparCondiciones(whereClauses);
-                var whereQuery = groupedWhereClauses.Any()
-                    ? $"WHERE {string.Join(" AND ", groupedWhereClauses)}"
+                var whereQuery = whereClauses.Any()
+                    ? $"WHERE {string.Join(" AND ", whereClauses)}"
                     : "";
 
-                // OPTIMIZACIÓN 4: Orden optimizado
-                string orderByClause = BuildOptimizedOrderByClause(request, queryStrategy);
+                // ORDER BY - Importante: usar alias cuando existan
+                string orderByClause = BuildCorrectOrderByClause(request);
 
-                // OPTIMIZACIÓN 5: Ejecutar en paralelo la consulta y el conteo
-                var (results, totalRecordsResult) = await ExecuteOptimizedPaginatedQueryAsync(
-                    request, table, whereQuery, parameters, selectClause,
-                    groupByClause, orderByClause, page, pageSize, queryStrategy);
+                // Query de conteo
+                long totalRecords = await GetTotalRecordsAsync(table, whereQuery, groupByClause, parameters, request);
 
-                // OPTIMIZACIÓN 6: Compresión de datos para cache
-                CacheResults(cacheKey, results, totalRecordsResult, request);
+                // Query principal con paginación
+                var results = await ExecutePaginatedQueryAsync(
+                    selectClause, table, whereQuery, groupByClause,
+                    orderByClause, offset, pageSize, parameters);
 
-                // Notificación asíncrona (no bloquear la respuesta)
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await _hubContext.Clients.Group("PedidosGeneral")
-                            .SendAsync("DatosActualizados", new
-                            {
-                                Tabla = table,
-                                Accion = "ConsultaFiltros",
-                                Timestamp = DateTime.UtcNow,
-                                TotalRegistros = totalRecordsResult,
-                                Page = page,
-                                QueryTime = DateTime.UtcNow
-                            });
-                    }
-                    catch { /* Ignorar errores en notificación */ }
-                });
-
-                return Ok(new
+                // Preparar respuesta
+                var response = new
                 {
                     PageSize = pageSize,
                     Page = page,
-                    TotalRecords = totalRecordsResult,
-                    TotalPages = (totalRecordsResult / pageSize),
-                    Data = results,
-                    QueryStrategy = queryStrategy.ToString(),
-                    FromCache = false
-                });
+                    TotalRecords = totalRecords,
+                    TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
+                    Data = results
+                };
+
+                // Cachear
+                if (results.Count > 0 && results.Count < 1000)
+                {
+                    _memoryCache.Set(cacheKey, response, TimeSpan.FromMinutes(2));
+                }
+
+                return Ok(response);
             }
             catch (Exception ex)
             {
-                return HandleException(ex);
+                return StatusCode(500, new
+                {
+                    Message = "Error interno del servidor",
+                    Details = ex.Message,
+                    StackTrace = ex.StackTrace
+                });
             }
         }
 
-        // Métodos de optimización adicionales:
-
-        private string GenerateCacheKey(FiltrosRequest request, string table, int page, int pageSize)
+        private string GenerateSimpleCacheKey(FiltrosRequest request, string table, int page, int pageSize)
         {
-            var validFiltros = request.Filtros
-                .Where(f => !string.IsNullOrWhiteSpace(f.Key) && !string.IsNullOrWhiteSpace(f.Value))
-                .ToList();
-
-            var selects = request.Selects?
-                .Where(s => !string.IsNullOrWhiteSpace(s.Key))
-                .Select(s => $"{s.Key}_{s.Alias}")
-                .ToList() ?? new List<string>();
-
-            var agregaciones = request.Agregaciones?
-                .Where(a => !string.IsNullOrWhiteSpace(a.Key))
-                .Select(a => $"{a.Key}_{a.Operation}_{a.Alias}")
-                .ToList() ?? new List<string>();
-
             var keyParts = new List<string>
             {
-                $"masivo_{table}",
-                $"page{page}_size{pageSize}",
-                $"filtros_{validFiltros.Count}",
-                $"selects_{string.Join("_", selects)}",
-                $"aggs_{string.Join("_", agregaciones)}"
+                $"masivo_v2_{table}",
+                $"page{page}_size{pageSize}"
             };
 
-            if (validFiltros.Any())
+            if (request.Filtros?.Any() == true)
             {
-                var filtrosHash = string.Join("_", validFiltros
-                    .Select(f => $"{f.Key.GetHashCode()}_{f.Value.GetHashCode()}_{f.Operator?.GetHashCode()}"));
-                keyParts.Add($"fh_{filtrosHash}");
+                var mainFilters = request.Filtros
+                    .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
+                           !string.IsNullOrWhiteSpace(f.Value))
+                    .Take(3)
+                    .Select(f => $"{f.Key}_{f.Value}")
+                    .ToList();
+
+                if (mainFilters.Any())
+                {
+                    keyParts.Add($"filters_{string.Join("_", mainFilters)}");
+                }
             }
 
             return string.Join("|", keyParts);
         }
 
-        private enum QueryStrategy
-        {
-            DirectQuery,        // Consulta directa con ROW_NUMBER
-            KeysetPagination,   // Paginación por clave
-            ApproximateCount,   // Conteo aproximado
-            MaterializedView    // Usar vista materializada si existe
-        }
-
-        private QueryStrategy DetermineQueryStrategy(FiltrosRequest request, string table)
-        {
-            // Estrategia 1: Si hay filtros de fecha, usar paginación por clave
-            var hasDateFilters = request.Filtros.Any(f =>
-                f.Key.ToLower().Contains("fecha") ||
-                f.Key.ToLower().Contains("date"));
-
-            // Estrategia 2: Si no hay GROUP BY y hay orden por ID/fecha, usar keyset
-            var hasGroupBy = request.Selects?.Any() == true && request.Agregaciones?.Any() != true;
-            var hasIdOrder = request.Order?.Any(o =>
-                o.Key.ToLower().Contains("id") ||
-                o.Key.ToLower().Contains("fecha")) == true;
-
-            // Estrategia 3: Si es tabla grande sin filtros específicos, usar conteo aproximado
-            var isLargeTable = table.ToLower() switch
-            {
-                "ventad" or "venta" or "invd" or "inv" => true,
-                _ => false
-            };
-
-            if (hasDateFilters && hasIdOrder && !hasGroupBy)
-                return QueryStrategy.KeysetPagination;
-            else if (isLargeTable && request.Filtros.Count == 0)
-                return QueryStrategy.ApproximateCount;
-            else
-                return QueryStrategy.DirectQuery;
-        }
-
-        private (string selectClause, string groupByClause) BuildOptimizedSelectClause(
-    FiltrosRequest request, QueryStrategy strategy)
+        private (string selectClause, string groupByClause) BuildCorrectSelectClause(FiltrosRequest request)
         {
             var selectParts = new List<string>();
             var groupByParts = new List<string>();
 
-            // Solo incluir columnas realmente necesarias
-            var validSelects = request.Selects?
-                .Where(s => !string.IsNullOrWhiteSpace(s.Key))
-                .Take(20) // Limitar a 20 columnas máximo
-                .ToList();
-
-            if (validSelects != null && validSelects.Any())
+            // 1. Primero procesar SELECTs normales (no agregaciones)
+            if (request.Selects?.Any() == true)
             {
-                foreach (var select in validSelects)
+                foreach (var select in request.Selects.Where(s => !string.IsNullOrWhiteSpace(s.Key)))
                 {
-                    // Usar alias para reducir tamaño de datos
-                    var column = select.Key.Contains('.') ? select.Key : $"{select.Key}";
-                    var alias = !string.IsNullOrWhiteSpace(select.Alias)
-                        ? select.Alias
-                        : $"col{selectParts.Count}";
+                    var column = FormatColumnName(select.Key);
 
-                    // IMPORTANTE: Si hay alias, usar la columna original con alias
+                    // SOLO agregar AS si hay alias definido explícitamente
                     if (!string.IsNullOrWhiteSpace(select.Alias))
                     {
                         selectParts.Add($"{column} AS [{select.Alias}]");
                     }
                     else
                     {
+                        // Sin alias, solo la columna
                         selectParts.Add(column);
                     }
 
-                    // En GROUP BY usar la columna ORIGINAL, no el alias
-                    // SOLO si hay agregaciones en la consulta
-                    if (request.Agregaciones?.Any() == true)
-                    {
-                        // Para GROUP BY usar siempre la columna original
-                        groupByParts.Add(column);
-                    }
+                    // Para GROUP BY, siempre usar la columna ORIGINAL
+                    groupByParts.Add(column);
                 }
             }
 
-            // Agregaciones optimizadas
-            var validAgregaciones = request.Agregaciones?
-                .Where(a => !string.IsNullOrWhiteSpace(a.Key))
-                .Take(10) // Limitar agregaciones
-                .ToList();
-
-            if (validAgregaciones != null && validAgregaciones.Any())
+            // 2. Procesar AGREGACIONES
+            if (request.Agregaciones?.Any() == true)
             {
-                foreach (var agg in validAgregaciones)
+                bool hasAggregations = request.Agregaciones.Any(a =>
+                    !string.IsNullOrWhiteSpace(a.Operation) &&
+                    a.Operation.ToUpper() != "DISTINCT");
+
+                foreach (var agg in request.Agregaciones.Where(a => !string.IsNullOrWhiteSpace(a.Key)))
                 {
-                    string operation = GetOptimizedAggregation(agg.Operation);
+                    var operation = GetAggregationOperation(agg.Operation);
+                    var columnExpression = FormatColumnExpression(agg.Key);
 
-                    // Para agregaciones, la columna debe ser referenciada correctamente
-                    var aggColumn = agg.Key.Contains('.') ? agg.Key : $"{agg.Key}";
-                    string alias = !string.IsNullOrWhiteSpace(agg.Alias)
-                        ? agg.Alias
-                        : $"{operation.ToLower()}_{agg.Key.Replace(".", "_")}";
-
-                    if (operation == "DISTINCT")
+                    // Para expresiones complejas como "(ventad.Precio * ventad.Cantidad)"
+                    // mantenerlas entre paréntesis
+                    if (agg.Key.Contains("*") || agg.Key.Contains("/") || agg.Key.Contains("+") || agg.Key.Contains("-"))
                     {
-                        selectParts.Add($"DISTINCT {aggColumn} AS [{alias}]");
-                        // DISTINCT no requiere GROUP BY
-                    }
-                    else
-                    {
-                        selectParts.Add($"{operation}({aggColumn}) AS [{alias}]");
-                        // Para funciones agregadas, agregar la columna original al GROUP BY
-                        // SOLO si no es una función de agregación (COUNT, SUM, AVG, etc.)
-                        if (operation == "SUM" || operation == "COUNT" || operation == "AVG" ||
-                            operation == "MIN" || operation == "MAX")
+                        if (!agg.Key.StartsWith("(") || !agg.Key.EndsWith(")"))
                         {
-                            // Las columnas en funciones agregadas NO van en GROUP BY
+                            columnExpression = $"({agg.Key})";
+                        }
+                    }
+
+                    // SOLO agregar AS si hay alias definido explícitamente
+                    if (!string.IsNullOrWhiteSpace(agg.Alias))
+                    {
+                        if (operation == "DISTINCT")
+                        {
+                            selectParts.Add($"DISTINCT {columnExpression} AS [{agg.Alias}]");
                         }
                         else
                         {
-                            groupByParts.Add(aggColumn);
+                            selectParts.Add($"{operation}({columnExpression}) AS [{agg.Alias}]");
+                        }
+                    }
+                    else
+                    {
+                        // Sin alias
+                        if (operation == "DISTINCT")
+                        {
+                            selectParts.Add($"DISTINCT {columnExpression}");
+                        }
+                        else
+                        {
+                            selectParts.Add($"{operation}({columnExpression})");
+                        }
+                    }
+
+                    // IMPORTANTE: Las columnas usadas en funciones de agregación (SUM, COUNT, AVG, MIN, MAX)
+                    // NO deben ir en el GROUP BY a menos que también aparezcan como columnas individuales
+                    if (operation == "DISTINCT" || (!hasAggregations && request.Selects?.Any() != true))
+                    {
+                        // Solo agregar al GROUP BY si es DISTINCT o si no hay otras agregaciones
+                        if (!columnExpression.StartsWith("(")) // No agrupar por expresiones complejas
+                        {
+                            groupByParts.Add(columnExpression);
                         }
                     }
                 }
             }
 
-            // Si no hay selects específicos, usar solo columnas esenciales
+            // 3. Si no hay SELECTs ni AGREGACIONES, usar SELECT *
             if (!selectParts.Any())
             {
                 selectParts.Add("*");
@@ -280,468 +224,438 @@ namespace MyApiProject.Controllers
 
             string selectClause = string.Join(", ", selectParts);
 
-            // Solo incluir GROUP BY si hay columnas para agrupar
-            string groupByClause = groupByParts.Any()
-                ? $"GROUP BY {string.Join(", ", groupByParts.Distinct())}" // DISTINCT para evitar duplicados
-                : "";
+            // 4. Determinar GROUP BY clause
+            string groupByClause = "";
+            if (request.Agregaciones?.Any(a =>
+                !string.IsNullOrWhiteSpace(a.Operation) &&
+                a.Operation.ToUpper() != "DISTINCT") == true &&
+                request.Selects?.Any() == true)
+            {
+                // Si hay funciones de agregación y columnas normales, necesitamos GROUP BY
+                if (groupByParts.Any())
+                {
+                    groupByClause = $"GROUP BY {string.Join(", ", groupByParts.Distinct())}";
+                }
+            }
+            else if (request.Agregaciones?.Any(a =>
+                a.Operation?.ToUpper() == "DISTINCT") == true)
+            {
+                // Solo DISTINCT, no necesita GROUP BY
+                groupByClause = "";
+            }
 
             return (selectClause, groupByClause);
         }
-        private void BuildOptimizedFilters(
-            FiltrosRequest request,
-            List<string> whereClauses,
-            List<SqlParameter> parameters,
-            Dictionary<string, int> parameterCounters,
-            QueryStrategy strategy)
+
+        private string FormatColumnName(string column)
         {
-            // Filtrar elementos vacíos primero
-            var validFiltros = request.Filtros
-                .Where(f => !string.IsNullOrWhiteSpace(f.Key) && !string.IsNullOrWhiteSpace(f.Value))
-                .ToList();
+            if (string.IsNullOrWhiteSpace(column))
+                return column;
 
-            // OPTIMIZACIÓN: Procesar primero filtros de índice
-            var indexedFilters = validFiltros
-                .Where(f => IsIndexedColumn(f.Key))
-                .OrderByDescending(f => f.Key.ToLower().Contains("id")) // IDs primero
-                .ThenByDescending(f => f.Key.ToLower().Contains("fecha")); // Fechas después
-
-            var nonIndexedFilters = validFiltros
-                .Where(f => !IsIndexedColumn(f.Key));
-
-            // Procesar filtros indexados primero (mejor performance)
-            foreach (var filter in indexedFilters)
+            // Si es una expresión compleja, dejarla tal cual
+            if (column.Contains("(") || column.Contains("*") || column.Contains("/") ||
+                column.Contains("+") || column.Contains("-"))
             {
-                AddOptimizedWhereClause(filter, whereClauses, parameters, parameterCounters);
+                return column;
             }
 
-            // Procesar filtros no indexados después
-            foreach (var filter in nonIndexedFilters)
+            // Si tiene punto, formatear como [Tabla].[Columna]
+            if (column.Contains("."))
             {
-                AddOptimizedWhereClause(filter, whereClauses, parameters, parameterCounters);
-            }
-
-            // Agregar optimizaciones específicas por estrategia
-            if (strategy == QueryStrategy.KeysetPagination)
-            {
-                // Para paginación por keyset, asegurar orden consistente
-                var dateFilter = validFiltros.FirstOrDefault(f => f.Key.ToLower().Contains("fecha"));
-                if (dateFilter != null && !whereClauses.Any(w => w.Contains("ROW_NUMBER")))
+                var parts = column.Split('.');
+                if (parts.Length == 2)
                 {
-                    whereClauses.Add($"{dateFilter.Key} >= @LastDate");
-                    parameters.Add(new SqlParameter("@LastDate", DateTime.UtcNow.AddDays(-30)));
+                    return $"[{parts[0]}].[{parts[1]}]";
+                }
+                else if (parts.Length > 2)
+                {
+                    // Para casos como "schema.table.column"
+                    return $"[{string.Join("].[", parts)}]";
+                }
+            }
+
+            // Columna simple
+            return $"[{column}]";
+        }
+
+        private string FormatColumnExpression(string expression)
+        {
+            if (string.IsNullOrWhiteSpace(expression))
+                return expression;
+
+            // Si es una expresión matemática, mantenerla entre paréntesis
+            if (expression.Contains("*") || expression.Contains("/") ||
+                expression.Contains("+") || expression.Contains("-"))
+            {
+                // Verificar si ya tiene paréntesis
+                if (!expression.StartsWith("(") || !expression.EndsWith(")"))
+                {
+                    return $"({expression})";
+                }
+                return expression;
+            }
+
+            // Formatear nombre de columna normal
+            return FormatColumnName(expression);
+        }
+
+        private void BuildSimpleFilters(
+     FiltrosRequest request,
+     List<string> whereClauses,
+     List<SqlParameter> parameters)
+        {
+            if (request.Filtros?.Any() != true) return;
+
+            int paramCounter = parameters.Count; // Usar el conteo actual en lugar de empezar desde 0
+
+            foreach (var filter in request.Filtros.Where(f =>
+                !string.IsNullOrWhiteSpace(f.Key) &&
+                !string.IsNullOrWhiteSpace(f.Value)))
+            {
+                string operatorClause = GetOperatorClause(filter.Operator);
+
+                // Para columnas, usar formato correcto
+                string column;
+                if (filter.Key.Contains("."))
+                {
+                    var parts = filter.Key.Split('.');
+                    column = $"[{parts[0]}].[{parts[1]}]";
+                }
+                else if (filter.Key.Contains("*") || filter.Key.Contains("/") ||
+                         filter.Key.Contains("+") || filter.Key.Contains("-") ||
+                         filter.Key.Contains("("))
+                {
+                    column = filter.Key; // Expresión compleja
+                }
+                else
+                {
+                    column = $"[{filter.Key}]";
+                }
+
+                // Manejar operadores IN y NOT IN
+                if (operatorClause == "IN" || operatorClause == "NOT IN")
+                {
+                    HandleInOperator(filter, column, operatorClause, whereClauses, parameters, ref paramCounter);
+                }
+                else if (operatorClause == "LIKE")
+                {
+                    var paramName = $"@p{paramCounter++}";
+                    whereClauses.Add($"{column} LIKE {paramName}");
+                    parameters.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
+                }
+                else
+                {
+                    var paramName = $"@p{paramCounter++}";
+                    whereClauses.Add($"{column} {operatorClause} {paramName}");
+
+                    // Intentar convertir valores numéricos
+                    if (decimal.TryParse(filter.Value, out decimal decimalValue))
+                    {
+                        parameters.Add(new SqlParameter(paramName, decimalValue));
+                    }
+                    else if (int.TryParse(filter.Value, out int intValue))
+                    {
+                        parameters.Add(new SqlParameter(paramName, intValue));
+                    }
+                    else if (DateTime.TryParse(filter.Value, out DateTime dateValue))
+                    {
+                        parameters.Add(new SqlParameter(paramName, dateValue));
+                    }
+                    else
+                    {
+                        parameters.Add(new SqlParameter(paramName, filter.Value));
+                    }
                 }
             }
         }
 
-        private bool IsIndexedColumn(string columnName)
-        {
-            // Columnas que típicamente tienen índices
-            var indexedColumns = new[]
-            {
-                "id", "ID", "Id",
-                "fecha", "Fecha", "FECHA",
-                "fechaemision", "FechaEmision",
-                "cliente", "Cliente",
-                "articulo", "Articulo",
-                "codigo", "Codigo"
-            };
-
-            return indexedColumns.Any(ic =>
-                columnName.EndsWith($".{ic}") ||
-                columnName.Equals(ic, StringComparison.OrdinalIgnoreCase));
-        }
-
-        private void AddOptimizedWhereClause(
+        private void HandleInOperator(
             BusquedaParams filter,
+            string column,
+            string operatorClause,
             List<string> whereClauses,
             List<SqlParameter> parameters,
-            Dictionary<string, int> parameterCounters)
+            ref int paramCounter)
         {
-            string operatorClause = filter.Operator?.ToLower() switch
+            try
             {
-                "like" when filter.Value.Length > 2 => "LIKE", // Solo LIKE para valores > 2 chars
-                "=" => "=",
+                // Dividir los valores por comas
+                var values = filter.Value.Split(',')
+                    .Select(v => v.Trim())
+                    .Where(v => !string.IsNullOrEmpty(v))
+                    .ToArray();
+
+                if (values.Length == 0)
+                {
+                    // Si no hay valores válidos, no agregar condición
+                    return;
+                }
+
+                // Caso especial: un solo valor
+                if (values.Length == 1)
+                {
+                    var paramName = $"@p{paramCounter++}";
+                    whereClauses.Add($"{column} {operatorClause.Replace("IN", "=").Replace("NOT IN", "<>")} {paramName}");
+
+                    // Determinar tipo del valor
+                    if (decimal.TryParse(values[0], out decimal decimalValue))
+                    {
+                        parameters.Add(new SqlParameter(paramName, decimalValue));
+                    }
+                    else if (int.TryParse(values[0], out int intValue))
+                    {
+                        parameters.Add(new SqlParameter(paramName, intValue));
+                    }
+                    else if (DateTime.TryParse(values[0], out DateTime dateValue))
+                    {
+                        parameters.Add(new SqlParameter(paramName, dateValue));
+                    }
+                    else
+                    {
+                        parameters.Add(new SqlParameter(paramName, values[0]));
+                    }
+                    return;
+                }
+
+                // Crear lista de parámetros para múltiples valores
+                var paramNames = new List<string>();
+                var paramTypes = new List<SqlDbType>();
+                var paramValues = new List<object>();
+
+                // Determinar el tipo de datos basado en el primer valor
+                SqlDbType? commonType = null;
+
+                for (int i = 0; i < values.Length; i++)
+                {
+                    var paramName = $"@p{paramCounter++}";
+                    paramNames.Add(paramName);
+
+                    if (int.TryParse(values[i], out int intValue))
+                    {
+                        paramValues.Add(intValue);
+                        paramTypes.Add(SqlDbType.Int);
+                        if (commonType == null) commonType = SqlDbType.Int;
+                    }
+                    else if (decimal.TryParse(values[i], out decimal decimalValue))
+                    {
+                        paramValues.Add(decimalValue);
+                        paramTypes.Add(SqlDbType.Decimal);
+                        if (commonType == null) commonType = SqlDbType.Decimal;
+                    }
+                    else if (DateTime.TryParse(values[i], out DateTime dateValue))
+                    {
+                        paramValues.Add(dateValue);
+                        paramTypes.Add(SqlDbType.DateTime);
+                        if (commonType == null) commonType = SqlDbType.DateTime;
+                    }
+                    else
+                    {
+                        paramValues.Add(values[i]);
+                        paramTypes.Add(SqlDbType.NVarChar);
+                        if (commonType == null) commonType = SqlDbType.NVarChar;
+                    }
+                }
+
+                // Para múltiples valores, asegurarse de que todos sean del mismo tipo
+                // Si hay mezcla de tipos, convertir todo a string
+                if (paramTypes.Distinct().Count() > 1)
+                {
+                    paramNames.Clear();
+                    paramValues.Clear();
+                    paramCounter -= values.Length; // Resetear contador
+
+                    for (int i = 0; i < values.Length; i++)
+                    {
+                        var paramName = $"@p{paramCounter++}";
+                        paramNames.Add(paramName);
+                        paramValues.Add(values[i]);
+                    }
+                }
+
+                // Construir la cláusula IN/NOT IN
+                var inClause = $"{column} {operatorClause} ({string.Join(", ", paramNames)})";
+                whereClauses.Add(inClause);
+
+                // Agregar parámetros
+                for (int i = 0; i < paramNames.Count; i++)
+                {
+                    parameters.Add(new SqlParameter(paramNames[i], paramValues[i]));
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log del error (puedes usar ILogger en lugar de Console)
+                Console.WriteLine($"Error procesando operador IN/NOT IN: {ex.Message}");
+
+                // Fallback: tratar como igualdad simple
+                var paramName = $"@p{paramCounter++}";
+                whereClauses.Add($"{column} = {paramName}");
+                parameters.Add(new SqlParameter(paramName, filter.Value));
+            }
+        }
+
+        private string GetOperatorClause(string? operatorStr)
+        {
+            if (string.IsNullOrWhiteSpace(operatorStr)) return "=";
+
+            return operatorStr.ToUpper() switch
+            {
+                "LIKE" => "LIKE",
                 ">=" => ">=",
                 "<=" => "<=",
                 ">" => ">",
                 "<" => "<",
                 "<>" => "<>",
+                "!=" => "<>",
+                "IN" => "IN",
+                "NOT IN" => "NOT IN",
+                "BETWEEN" => "BETWEEN",
+                "NOT BETWEEN" => "NOT BETWEEN",
+                "IS NULL" => "IS NULL",
+                "IS NOT NULL" => "IS NOT NULL",
                 _ => "="
             };
-
-            var column = filter.Key;
-            if (!parameterCounters.ContainsKey(column))
-                parameterCounters[column] = 0;
-            else
-                parameterCounters[column]++;
-
-            var paramName = $"@{column.Replace(".", "_").Replace("[", "").Replace("]", "")}_{parameterCounters[column]}";
-
-            // Optimización para LIKE con wildcard al final solamente
-            if (operatorClause == "LIKE" && !filter.Value.EndsWith("%"))
-            {
-                whereClauses.Add($"{column} LIKE {paramName} + '%'");
-                parameters.Add(new SqlParameter(paramName, filter.Value));
-            }
-            else
-            {
-                whereClauses.Add($"{column} {operatorClause} {paramName}");
-                var paramValue = operatorClause == "LIKE" ? $"%{filter.Value}%" : filter.Value;
-                parameters.Add(new SqlParameter(paramName, paramValue));
-            }
         }
 
-        private string BuildOptimizedOrderByClause(FiltrosRequest request, QueryStrategy strategy)
-        {
-            // Optimización: Ordenar por columnas indexadas preferentemente
-            var validOrders = request.Order?
-                .Where(o => !string.IsNullOrWhiteSpace(o.Key))
-                .OrderBy(o => IsIndexedColumn(o.Key) ? 0 : 1) // Índices primero
-                .ToList();
 
-            if (validOrders == null || !validOrders.Any())
-            {
-                // Buscar columnas indexadas para orden
-                var indexedColumn = FindIndexedOrderColumn(request);
-                return $"ORDER BY {indexedColumn}";
-            }
+        private string BuildCorrectOrderByClause(FiltrosRequest request)
+        {
+            if (request.Order?.Any() != true)
+                return "";
 
             var orderParts = new List<string>();
 
-            foreach (var order in validOrders.Take(3)) // Máximo 3 columnas de orden
+            foreach (var order in request.Order.Where(o => !string.IsNullOrWhiteSpace(o.Key)))
             {
                 var direction = !string.IsNullOrWhiteSpace(order.Direction) &&
                                order.Direction.ToUpper() == "DESC" ? "DESC" : "ASC";
 
-                orderParts.Add($"{order.Key} {direction}");
-            }
+                // Para ORDER BY, usar alias si existe en las agregaciones o selects
+                string column;
 
-            return $"ORDER BY {string.Join(", ", orderParts)}";
-        }
+                // Buscar si esta columna tiene un alias en las agregaciones
+                var aggAlias = request.Agregaciones?
+                    .FirstOrDefault(a => a.Key == order.Key || a.Alias == order.Key);
 
-        private string FindIndexedOrderColumn(FiltrosRequest request)
-        {
-            // Buscar IDs primero
-            var idColumn = request.Selects?
-                .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.Key) &&
-                    (s.Key.EndsWith(".id") || s.Key.ToLower() == "id"));
-
-            if (idColumn != null)
-                return idColumn.Key;
-
-            // Buscar fechas
-            var dateColumn = request.Selects?
-                .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.Key) &&
-                    s.Key.ToLower().Contains("fecha"));
-
-            if (dateColumn != null)
-                return dateColumn.Key;
-
-            // Buscar cualquier columna indexada
-            var indexedColumn = request.Selects?
-                .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.Key) && IsIndexedColumn(s.Key));
-
-            return indexedColumn?.Key ?? "id";
-        }
-
-        private string GetOptimizedAggregation(string operation)
-        {
-            var validOps = new Dictionary<string, string>
-            {
-                ["SUM"] = "SUM",
-                ["COUNT"] = "COUNT",
-                ["AVG"] = "AVG",
-                ["MIN"] = "MIN",
-                ["MAX"] = "MAX",
-                ["DISTINCT"] = "DISTINCT",
-                ["APPROX_COUNT_DISTINCT"] = "APPROX_COUNT_DISTINCT" // SQL Server 2019+
-            };
-
-            return validOps.ContainsKey(operation?.ToUpper())
-                ? validOps[operation.ToUpper()]
-                : "COUNT";
-        }
-
-        private async Task<(List<Dictionary<string, object>> Data, long TotalRecords)>
-     ExecuteOptimizedPaginatedQueryAsync(
-         FiltrosRequest request,
-         string table,
-         string whereQuery,
-         List<SqlParameter> parameters,
-         string selectClause,
-         string groupByClause,
-         string orderByClause,
-         int page,
-         int pageSize,
-         QueryStrategy strategy)
-        {
-            int offset = (page - 1) * pageSize;
-
-            // Crear copias de los parámetros para evitar conflictos
-            var countParameters = parameters.Select(p =>
-                new SqlParameter(p.ParameterName, p.Value)).ToList();
-            var dataParameters = parameters.Select(p =>
-                new SqlParameter(p.ParameterName, p.Value)).ToList();
-
-            // OPTIMIZACIÓN: Ejecutar conteo en paralelo si es necesario
-            var countTask = strategy == QueryStrategy.ApproximateCount
-                ? GetApproximateCountAsync(table, whereQuery, countParameters)
-                : GetOptimizedTotalRecordsAsync(table, whereQuery, countParameters, groupByClause);
-
-            // Construir query optimizada
-            string paginatedQuery;
-            if (strategy == QueryStrategy.KeysetPagination && page > 1)
-            {
-                paginatedQuery = BuildKeysetPaginationQuery(
-                    selectClause, table, whereQuery, groupByClause, orderByClause, pageSize);
-            }
-            else
-            {
-                paginatedQuery = BuildOptimizedPaginatedQuery(
-                    selectClause, table, whereQuery, groupByClause, orderByClause, offset, pageSize);
-            }
-
-            // Ejecutar consulta de datos con parámetros separados
-            var dataTask = ExecuteDataQueryAsync(paginatedQuery, dataParameters, offset, pageSize, strategy);
-
-            // Esperar ambas tareas
-            await Task.WhenAll(countTask, dataTask);
-
-            return (await dataTask, await countTask);
-        }
-
-        private async Task<long> GetApproximateCountAsync(string table, string whereQuery, List<SqlParameter> parameters)
-        {
-            try
-            {
-                await using var connection = await OpenConnectionAsync(10); // Timeout corto
-
-                string countQuery = $@"
-                    SELECT SUM(ps.row_count) as estimated_total
-                    FROM sys.dm_db_partition_stats ps
-                    JOIN sys.objects o ON ps.object_id = o.object_id
-                    WHERE o.name = @TableName
-                      AND ps.index_id IN (0, 1)";
-
-                await using var command = new SqlCommand(countQuery, connection);
-                command.Parameters.AddWithValue("@TableName", ExtractMainTable(table));
-
-                var result = await command.ExecuteScalarAsync();
-                return result != DBNull.Value ? Convert.ToInt64(result) : 0;
-            }
-            catch
-            {
-                return 1000000; // Valor por defecto para tablas grandes
-            }
-        }
-
-        private object ExtractMainTable(string table)
-        {
-            throw new NotImplementedException();
-        }
-
-        private async Task<long> GetOptimizedTotalRecordsAsync(
-    string table,
-    string whereQuery,
-    List<SqlParameter> parameters,
-    string groupByClause)
-        {
-            try
-            {
-                await using var connection = await OpenConnectionAsync(30);
-
-                // Para consultas simples, usar COUNT_BIG rápido
-                if (string.IsNullOrEmpty(groupByClause) && !table.ToUpper().Contains("JOIN"))
+                if (aggAlias != null && !string.IsNullOrWhiteSpace(aggAlias.Alias))
                 {
-                    string countQuery = $@"
-                SELECT COUNT_BIG(*) 
-                FROM {table}
-                {whereQuery}";
-
-                    await using var command = new SqlCommand(countQuery, connection);
-
-                    // Usar AddWithValue para evitar conflictos de colección
-                    foreach (var param in parameters)
-                    {
-                        command.Parameters.AddWithValue(param.ParameterName, param.Value);
-                    }
-
-                    var result = await command.ExecuteScalarAsync();
-                    return Convert.ToInt64(result);
+                    // Usar el alias de la agregación
+                    column = $"[{aggAlias.Alias}]";
                 }
                 else
                 {
-                    // Para consultas complejas, usar estimación
-                    return await GetApproximateCountAsync(table, whereQuery, parameters);
-                }
-            }
-            catch
-            {
-                return await GetApproximateCountAsync(table, whereQuery, parameters);
-            }
-        }
+                    // Buscar en selects normales
+                    var selectAlias = request.Selects?
+                        .FirstOrDefault(s => s.Key == order.Key || s.Alias == order.Key);
 
-        private string BuildKeysetPaginationQuery(
-            string selectClause,
-            string table,
-            string whereQuery,
-            string groupByClause,
-            string orderByClause,
-            int pageSize)
-        {
-            // Remover "ORDER BY " del string
-            var orderBy = orderByClause.StartsWith("ORDER BY ")
-                ? orderByClause.Substring(9)
-                : orderByClause;
-
-            // Keyset pagination (más rápido para grandes datasets)
-            return $@"
-                SELECT TOP({pageSize}) {selectClause}
-                FROM {table}
-                {whereQuery}
-                {groupByClause}
-                AND {orderBy.Split(' ')[0]} > @LastKey
-                ORDER BY {orderBy}";
-        }
-
-        private string BuildOptimizedPaginatedQuery(
-            string selectClause,
-            string table,
-            string whereQuery,
-            string groupByClause,
-            string orderByClause,
-            int offset,
-            int pageSize)
-        {
-            // Usar OFFSET FETCH para SQL Server 2012+
-            if (string.IsNullOrEmpty(groupByClause))
-            {
-                return $@"
-                    SELECT {selectClause}
-                    FROM {table}
-                    {whereQuery}
-                    {orderByClause}
-                    OFFSET {offset} ROWS
-                    FETCH NEXT {pageSize} ROWS ONLY";
-            }
-            else
-            {
-                return $@"
-                    WITH GroupedData AS (
-                        SELECT {selectClause}
-                        FROM {table}
-                        {whereQuery}
-                        {groupByClause}
-                    )
-                    SELECT *
-                    FROM GroupedData
-                    {orderByClause}
-                    OFFSET {offset} ROWS
-                    FETCH NEXT {pageSize} ROWS ONLY";
-            }
-        }
-
-        private async Task<List<Dictionary<string, object>>> ExecuteDataQueryAsync(
-     string query,
-     List<SqlParameter> parameters,
-     int offset,
-     int pageSize,
-     QueryStrategy strategy)
-        {
-            var results = new List<Dictionary<string, object>>();
-
-            try
-            {
-                await using var connection = await OpenConnectionAsync(
-                    strategy == QueryStrategy.ApproximateCount ? 60 : 180);
-
-                await using var command = new SqlCommand(query, connection);
-                command.CommandTimeout = strategy == QueryStrategy.ApproximateCount ? 60 : 180;
-
-                // PRIMERO añadir todos los parámetros de filtro
-                if (parameters != null && parameters.Count > 0)
-                {
-                    // Usar copia de los parámetros para evitar duplicados
-                    foreach (var param in parameters)
+                    if (selectAlias != null && !string.IsNullOrWhiteSpace(selectAlias.Alias))
                     {
-                        // Verificar si el parámetro ya existe antes de añadirlo
-                        if (!command.Parameters.Contains(param.ParameterName))
+                        column = $"[{selectAlias.Alias}]";
+                    }
+                    else
+                    {
+                        // Usar la columna original
+                        if (order.Key.Contains("."))
                         {
-                            command.Parameters.AddWithValue(param.ParameterName, param.Value);
+                            var parts = order.Key.Split('.');
+                            column = $"[{parts[0]}].[{parts[1]}]";
+                        }
+                        else if (order.Key.Contains("*") || order.Key.Contains("/") ||
+                                 order.Key.Contains("+") || order.Key.Contains("-") ||
+                                 order.Key.Contains("("))
+                        {
+                            column = order.Key; // Expresión compleja
                         }
                         else
                         {
-                            // Si ya existe, actualizar el valor
-                            command.Parameters[param.ParameterName].Value = param.Value;
+                            column = $"[{order.Key}]";
                         }
                     }
                 }
 
-                // LUEGO añadir parámetros específicos de paginación solo si no existen
-                if (strategy == QueryStrategy.KeysetPagination)
+                orderParts.Add($"{column} {direction}");
+            }
+
+            return orderParts.Any() ? $"ORDER BY {string.Join(", ", orderParts)}" : "";
+        }
+
+        private string GetAggregationOperation(string? operation)
+        {
+            if (string.IsNullOrWhiteSpace(operation)) return "COUNT";
+
+            return operation.ToUpper() switch
+            {
+                "SUM" => "SUM",
+                "COUNT" => "COUNT",
+                "AVG" => "AVG",
+                "MIN" => "MIN",
+                "MAX" => "MAX",
+                "DISTINCT" => "DISTINCT",
+                _ => operation.ToUpper()
+            };
+        }
+
+        private async Task<long> GetTotalRecordsAsync(
+            string table,
+            string whereQuery,
+            string groupByClause,
+            List<SqlParameter> parameters,
+            FiltrosRequest request)
+        {
+            try
+            {
+                await using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                string countQuery;
+
+                if (string.IsNullOrEmpty(groupByClause))
                 {
-                    var lastKeyParamName = "@LastKey";
-                    if (!command.Parameters.Contains(lastKeyParamName))
-                    {
-                        command.Parameters.AddWithValue(lastKeyParamName, offset * pageSize);
-                    }
+                    // Conteo directo para consultas simples
+                    countQuery = $"SELECT COUNT_BIG(*) FROM {table} {whereQuery}";
                 }
                 else
                 {
-                    var offsetParamName = "@Offset";
-                    var pageSizeParamName = "@PageSize";
+                    // Para consultas con GROUP BY, necesitamos contar los grupos
+                    // Construir una versión simple de la consulta para contar
+                    var selectColumns = new List<string>();
 
-                    if (!command.Parameters.Contains(offsetParamName))
+                    if (request.Selects?.Any() == true)
                     {
-                        command.Parameters.AddWithValue(offsetParamName, offset);
+                        foreach (var select in request.Selects.Take(1)) // Solo una columna para contar
+                        {
+                            var column = select.Key.Contains('.') ? select.Key : $"[{select.Key}]";
+                            selectColumns.Add(column);
+                        }
                     }
-                    if (!command.Parameters.Contains(pageSizeParamName))
+                    else if (request.Agregaciones?.Any() == true)
                     {
-                        command.Parameters.AddWithValue(pageSizeParamName, pageSize);
+                        // Si solo hay agregaciones, contar por la primera columna de GROUP BY
+                        var groupByColumns = groupByClause.Replace("GROUP BY", "").Trim();
+                        if (!string.IsNullOrEmpty(groupByColumns))
+                        {
+                            var firstColumn = groupByColumns.Split(',').First().Trim();
+                            selectColumns.Add(firstColumn);
+                        }
                     }
+
+                    if (!selectColumns.Any())
+                    {
+                        selectColumns.Add("1");
+                    }
+
+                    countQuery = $@"
+                        SELECT COUNT(*) FROM (
+                            SELECT {string.Join(", ", selectColumns)}
+                            FROM {table} 
+                            {whereQuery} 
+                            {groupByClause}
+                        ) AS CountTable";
                 }
 
-                await using var reader = await command.ExecuteReaderAsync();
+                await using var command = new SqlCommand(countQuery, connection);
+                command.CommandTimeout = 30;
 
-                // Optimización: Leer en bloques
-                var buffer = new object[reader.FieldCount];
-                while (await reader.ReadAsync())
-                {
-                    var row = new Dictionary<string, object>();
-                    reader.GetValues(buffer);
-
-                    for (int i = 0; i < reader.FieldCount; i++)
-                    {
-                        row[reader.GetName(i)] = buffer[i] == DBNull.Value ? null : buffer[i];
-                    }
-                    results.Add(row);
-
-                    // Limitar resultados si es necesario
-                    if (results.Count >= pageSize * 2) // Doble para cache
-                        break;
-                }
-            }
-            catch (Exception ex)
-            {
-                // Fallback a consulta simple
-                return await ExecuteFallbackQueryAsync(query, parameters);
-            }
-
-            return results;
-        }
-
-        private async Task<List<Dictionary<string, object>>> ExecuteFallbackQueryAsync(
-    string query, List<SqlParameter> parameters)
-        {
-            var results = new List<Dictionary<string, object>>();
-
-            await using var connection = await OpenConnectionAsync(30);
-            await using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 30;
-
-            // Evitar duplicados en fallback también
-            if (parameters != null && parameters.Count > 0)
-            {
                 foreach (var param in parameters)
                 {
                     if (!command.Parameters.Contains(param.ParameterName))
@@ -749,71 +663,117 @@ namespace MyApiProject.Controllers
                         command.Parameters.AddWithValue(param.ParameterName, param.Value);
                     }
                 }
+
+                var result = await command.ExecuteScalarAsync();
+                return Convert.ToInt64(result);
+            }
+            catch (Exception ex)
+            {
+                // Log del error
+                Console.WriteLine($"Error en GetTotalRecordsAsync: {ex.Message}");
+
+                // Para consultas complejas, retornar un valor estimado
+                return 10000;
+            }
+        }
+        private string FormatParametersForDebug(List<SqlParameter> parameters)
+        {
+            var sb = new StringBuilder();
+            foreach (var p in parameters)
+            {
+                sb.AppendLine($"{p.ParameterName} = '{p.Value}'");
+            }
+            return sb.ToString();
+        }
+
+        private async Task<List<Dictionary<string, object>>> ExecutePaginatedQueryAsync(
+            string selectClause,
+            string table,
+            string whereQuery,
+            string groupByClause,
+            string orderByClause,
+            int offset,
+            int pageSize,
+            List<SqlParameter> parameters)
+        {
+            var results = new List<Dictionary<string, object>>();
+
+            await using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            // Construir query principal
+            var queryBuilder = new StringBuilder();
+
+            // Si hay GROUP BY, necesitamos una estructura especial para paginación
+            if (!string.IsNullOrEmpty(groupByClause))
+            {
+                queryBuilder.AppendLine("WITH PaginatedData AS (");
+                queryBuilder.AppendLine($"    SELECT {selectClause},");
+                queryBuilder.AppendLine($"    ROW_NUMBER() OVER ({orderByClause}) AS RowNum");
+                queryBuilder.AppendLine($"    FROM {table}");
+
+                if (!string.IsNullOrEmpty(whereQuery))
+                    queryBuilder.AppendLine($"    {whereQuery}");
+
+                queryBuilder.AppendLine($"    {groupByClause}");
+                queryBuilder.AppendLine(")");
+                queryBuilder.AppendLine("SELECT * FROM PaginatedData");
+                queryBuilder.AppendLine($"WHERE RowNum > {offset} AND RowNum <= {offset + pageSize}");
+
+                if (!string.IsNullOrEmpty(orderByClause))
+                {
+                    // Remover ORDER BY del CTE y ponerlo al final
+                    queryBuilder.AppendLine(orderByClause.Replace("OVER (", "OVER (").Replace("ORDER BY", ""));
+                }
+            }
+            else
+            {
+                // Consulta normal sin GROUP BY
+                queryBuilder.Append($"SELECT {selectClause} ");
+                queryBuilder.Append($"FROM {table} ");
+
+                if (!string.IsNullOrEmpty(whereQuery))
+                    queryBuilder.Append($"{whereQuery} ");
+
+                if (!string.IsNullOrEmpty(orderByClause))
+                    queryBuilder.Append($"{orderByClause} ");
+                else
+                    queryBuilder.Append("ORDER BY 1 ");
+
+                queryBuilder.Append($"OFFSET {offset} ROWS FETCH NEXT {pageSize} ROWS ONLY");
+            }
+            // 👇 AQUI IMPRIME EL QUERY COMPLETO EN CONSOLA
+            Console.WriteLine("========== QUERY PAGINADO ==========");
+            Console.WriteLine(queryBuilder.ToString());
+            Console.WriteLine("========== PARÁMETROS ==============");
+            Console.WriteLine(FormatParametersForDebug(parameters));
+            Console.WriteLine("====================================");
+            await using var command = new SqlCommand(queryBuilder.ToString(), connection);
+            command.CommandTimeout = 60; // Timeout más largo para consultas complejas
+
+            foreach (var param in parameters)
+            {
+                if (!command.Parameters.Contains(param.ParameterName))
+                {
+                    command.Parameters.AddWithValue(param.ParameterName, param.Value);
+                }
             }
 
             await using var reader = await command.ExecuteReaderAsync();
+
             while (await reader.ReadAsync())
             {
                 var row = new Dictionary<string, object>();
                 for (int i = 0; i < reader.FieldCount; i++)
                 {
-                    row[reader.GetName(i)] = reader.GetValue(i);
+                    var value = reader.GetValue(i);
+                    row[reader.GetName(i)] = value == DBNull.Value ? null : value;
                 }
                 results.Add(row);
-
-                if (results.Count > 1000) break; // Limitar en fallback
             }
 
             return results;
         }
 
-        private void CacheResults(string cacheKey, List<Dictionary<string, object>> data, long totalRecords, FiltrosRequest request)
-        {
-            try
-            {
-                // Determinar duración del cache basado en la complejidad de la consulta
-                var cacheDuration = DetermineCacheDuration(request, data.Count);
-
-                // Cachear datos
-                _memoryCache.Set(cacheKey, data, cacheDuration);
-
-                // Cachear total por separado
-                var totalKey = $"{cacheKey}_total";
-                _memoryCache.Set(totalKey, totalRecords, cacheDuration);
-                // Cachear también próxima página si hay datos
-                if (data.Count > 0)
-                {
-                    // Extraer la página actual del cacheKey (formato: page{n}_size{m}) y construir la key de la siguiente página
-                    var pageMatch = Regex.Match(cacheKey, @"page(\d+)_size");
-                    int currentPage = 1;
-                    if (pageMatch.Success && int.TryParse(pageMatch.Groups[1].Value, out var parsedPage))
-                        currentPage = parsedPage;
-
-                    var nextPageKey = cacheKey.Replace($"page{currentPage}_size", $"page{currentPage + 1}_size");
-                    _memoryCache.Set(nextPageKey, new List<Dictionary<string, object>>(),
-                        TimeSpan.FromMinutes(2)); // Cache corto para próxima página
-                }
-
-            }
-            catch
-            {
-                // Ignorar errores de cache
-            }
-        }
-
-        private TimeSpan DetermineCacheDuration(FiltrosRequest request, int dataCount)
-        {
-            // Cache más largo para consultas complejas o pocos datos
-            if (request.Agregaciones?.Any() == true || request.Selects?.Count > 5)
-                return TimeSpan.FromMinutes(10);
-
-            if (dataCount < 100)
-                return TimeSpan.FromMinutes(15);
-
-            if (request.Filtros.Count > 0)
-                return TimeSpan.FromMinutes(5);
-
-            return TimeSpan.FromMinutes(2);
-        }
     }
 }
