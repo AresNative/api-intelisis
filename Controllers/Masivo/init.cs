@@ -300,9 +300,9 @@ namespace MyApiProject.Controllers
         }
 
         private void BuildSimpleFilters(
-     FiltrosRequest request,
-     List<string> whereClauses,
-     List<SqlParameter> parameters)
+            FiltrosRequest request,
+            List<string> whereClauses,
+            List<SqlParameter> parameters)
         {
             if (request.Filtros?.Any() != true) return;
 
