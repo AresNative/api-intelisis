@@ -41,6 +41,14 @@ namespace MyApiProject.Controllers
             // Validaciones
             if (request == null)
                 return BadRequest(new { Message = "Request no puede ser nulo" });
+
+            // Validar que no haya demasiados filtros
+            var totalFilters = (request.Filtros?.Count ?? 0) +
+                              (request.FiltrosAnd?.Sum(g => g.Filtros?.Count ?? 0) ?? 0) +
+                              (request.FiltrosOr?.Sum(g => g.Filtros?.Count ?? 0) ?? 0);
+
+
+
             if (page > 1000)
             {
                 return BadRequest(new
@@ -49,22 +57,19 @@ namespace MyApiProject.Controllers
                     Recommendation = "Use filtros o keyset pagination"
                 });
             }
+
             var requestId = Guid.NewGuid().ToString("N")[..8];
-            _logger.LogInformation("[{RequestId}] Iniciando consulta masiva - Tabla: {Table}, Página: {Page}, Tamaño: {PageSize}",
-                requestId, table, page, pageSize);
+            _logger.LogInformation("[{RequestId}] Iniciando consulta masiva - Tabla: {Table}, Página: {Page}, Tamaño: {PageSize}, Filtros: {FilterCount}, Grupos AND: {AndGroups}, Grupos OR: {OrGroups}",
+                requestId, table, page, pageSize, request.Filtros?.Count ?? 0,
+                request.FiltrosAnd?.Count ?? 0, request.FiltrosOr?.Count ?? 0);
 
             int offset = (page - 1) * pageSize;
             try
             {
-                /*  var cacheKey = GenerateCacheKey(request, table, page, pageSize); */
-
-                /*if (_memoryCache.TryGetValue(cacheKey, out object cached))
-                    return Ok(cached); */
-
                 var (selectClause, groupByClause) = BuildOptimizedSelectClause(request);
                 var (whereClauses, parameters) = BuildOptimizedFilters(request);
                 var whereQuery = whereClauses.Any()
-                    ? $"WHERE {string.Join(" AND ", whereClauses)}"
+                    ? BuildFinalWhereClause(whereClauses)
                     : "";
 
                 string orderByClause = BuildOptimizedOrderByClause(request);
@@ -81,7 +86,6 @@ namespace MyApiProject.Controllers
                     table, whereQuery, parameters);
 
                 long? totalRecords = null;
-
 
                 if (!totalAsync)
                 {
@@ -140,11 +144,9 @@ namespace MyApiProject.Controllers
                     TotalIsEstimated = totalRecords == null,
                     Data = results,
                     Strategy = strategy.ToString(),
-                    RequestId = requestId
+                    RequestId = requestId,
+                    FiltrosAplicados = totalFilters
                 };
-
-                /* if (page <= 2 && pageSize <= 100)
-                    _memoryCache.Set(cacheKey, response, TimeSpan.FromMinutes(2)); */
 
                 return Ok(response);
             }
@@ -171,12 +173,6 @@ namespace MyApiProject.Controllers
             }
         }
 
-        #region Cache y Claves
-        private string GenerateCacheKey(FiltrosRequest req, string table, int page, int size)
-                   => $"masivo|{table}|p{page}|s{size}|f{req.Filtros?.Count ?? 0}|a{req.Agregaciones?.Count ?? 0}";
-
-        #endregion
-
         #region Construcción de Queries Optimizadas
 
         private (string selectClause, string groupByClause) BuildOptimizedSelectClause(FiltrosRequest request)
@@ -184,6 +180,8 @@ namespace MyApiProject.Controllers
             var selectParts = new List<string>();
             var groupByParts = new List<string>();
             var hasAggregations = false;
+            var hasDistinct = false;
+            var distinctColumns = new List<string>();
 
             // 1. Procesar SELECTs normales (optimizado)
             if (request.Selects?.Any() == true)
@@ -192,7 +190,6 @@ namespace MyApiProject.Controllers
                 {
                     var column = FormatColumnName(select.Key);
 
-                    // Usar alias solo si es diferente del nombre de columna
                     if (!string.IsNullOrWhiteSpace(select.Alias) &&
                         select.Alias != select.Key.Replace(".", "_"))
                     {
@@ -203,8 +200,6 @@ namespace MyApiProject.Controllers
                         selectParts.Add(column);
                     }
 
-                    // **CORRECCIÓN**: TODAS las columnas normales deben ir al GROUP BY
-                    // cuando hay agregaciones, excepto si son expresiones complejas
                     if (!IsComplexExpression(select.Key))
                     {
                         groupByParts.Add(column);
@@ -215,50 +210,50 @@ namespace MyApiProject.Controllers
             // 2. Procesar AGREGACIONES (optimizado)
             if (request.Agregaciones?.Any() == true)
             {
-                // Verificar si hay agregaciones reales (no DISTINCT simple)
+                // Verificar si hay agregaciones reales (COUNT, SUM, AVG, etc.)
                 hasAggregations = request.Agregaciones.Any(a =>
                     !string.IsNullOrWhiteSpace(a.Operation) &&
                     a.Operation.ToUpper() != "DISTINCT");
+
+                // Verificar si hay DISTINCT
+                hasDistinct = request.Agregaciones.Any(a =>
+                    a.Operation?.ToUpper() == "DISTINCT");
 
                 foreach (var agg in request.Agregaciones.Where(a => !string.IsNullOrWhiteSpace(a.Key)))
                 {
                     var operation = GetAggregationOperation(agg.Operation);
                     var columnExpression = FormatColumnExpression(agg.Key);
 
-                    // Manejar COUNT(DISTINCT) optimizado
+                    // Manejar COUNT(DISTINCT ...)
                     if (operation == "COUNT DISTINCT")
                     {
                         var distinctColumn = FormatColumnExpression(agg.Key);
                         var alias = !string.IsNullOrWhiteSpace(agg.Alias)
                             ? $"AS [{agg.Alias}]"
                             : "";
-
                         selectParts.Add($"COUNT(DISTINCT {distinctColumn}) {alias}");
                         continue;
                     }
 
-                    // Manejar DISTINCT simple
+                    // Manejar DISTINCT simple - NO es una agregación, es una cláusula SELECT
                     if (operation == "DISTINCT")
                     {
-                        var alias = !string.IsNullOrWhiteSpace(agg.Alias)
-                            ? $"AS [{agg.Alias}]"
-                            : "";
-
-                        selectParts.Add($"DISTINCT {columnExpression} {alias}");
-
-                        // Para DISTINCT simple sin otras agregaciones, agregar al GROUP BY
-                        if (!hasAggregations)
+                        // Solo agregar la columna si no está ya en la lista
+                        if (!selectParts.Any(p => p.Contains($"[{agg.Alias}]") ||
+                            p.Contains($"{columnExpression} AS")))
                         {
-                            groupByParts.Add(columnExpression);
+                            var alias = !string.IsNullOrWhiteSpace(agg.Alias)
+                                ? $"AS [{agg.Alias}]"
+                                : "";
+                            selectParts.Add($"{columnExpression} {alias}");
                         }
                         continue;
                     }
 
-                    // Otras funciones de agregación
+                    // Otras funciones de agregación (COUNT, SUM, AVG, etc.)
                     var aggAlias = !string.IsNullOrWhiteSpace(agg.Alias)
                         ? $"AS [{agg.Alias}]"
                         : "";
-
                     selectParts.Add($"{operation}({columnExpression}) {aggAlias}");
                 }
             }
@@ -269,18 +264,21 @@ namespace MyApiProject.Controllers
                 selectParts.Add("*");
             }
 
+            // 4. Construir la cláusula SELECT
             string selectClause = string.Join(", ", selectParts);
 
-            // 4. GROUP BY optimizado - **CORRECCIÓN CRÍTICA**
+            // 5. Aplicar DISTINCT a nivel de SELECT si hay DISTINCT
+            if (hasDistinct && !hasAggregations)
+            {
+                // Solo aplicar DISTINCT si no hay otras agregaciones
+                selectClause = $"DISTINCT {selectClause}";
+            }
+
+            // 6. GROUP BY optimizado
             string groupByClause = "";
 
-            if (hasAggregations && request.Selects?.Any() == true)
+            if (hasAggregations && groupByParts.Any())
             {
-                // **IMPORTANTE**: Cuando hay agregaciones, TODAS las columnas del SELECT
-                // que no sean agregaciones deben estar en el GROUP BY
-                // (excepto expresiones complejas que se manejan diferente)
-
-                // Filtrar solo columnas que no sean complejas
                 var validGroupByColumns = groupByParts
                     .Where(g => !IsComplexExpression(g))
                     .Distinct()
@@ -290,30 +288,8 @@ namespace MyApiProject.Controllers
                 {
                     groupByClause = $"GROUP BY {string.Join(", ", validGroupByColumns)}";
                 }
-                else
-                {
-                    // Si todas las columnas son expresiones complejas, 
-                    // no usar GROUP BY (será una agregación total)
-                    hasAggregations = false;
-                }
             }
-            else if (request.Agregaciones?.Any(a => a.Operation?.ToUpper() == "DISTINCT") == true && !hasAggregations)
-            {
-                // Solo DISTINCT simple sin otras agregaciones
-                // GROUP BY depende de si hay columnas normales
-                if (groupByParts.Any())
-                {
-                    var validGroupByColumns = groupByParts
-                        .Where(g => !IsComplexExpression(g))
-                        .Distinct()
-                        .ToList();
-
-                    if (validGroupByColumns.Any())
-                    {
-                        groupByClause = $"GROUP BY {string.Join(", ", validGroupByColumns)}";
-                    }
-                }
-            }
+            // NOTA: Si solo hay DISTINCT sin GROUP BY, dejamos groupByClause vacío
 
             return (selectClause, groupByClause);
         }
@@ -323,60 +299,275 @@ namespace MyApiProject.Controllers
             var whereClauses = new List<string>();
             var parameters = new List<SqlParameter>();
 
-            if (request.Filtros?.Any() != true)
+            if (request.Filtros?.Any() != true &&
+                request.FiltrosAnd?.Any() != true &&
+                request.FiltrosOr?.Any() != true)
                 return (whereClauses, parameters);
 
             int paramCounter = 0;
-            int filterCount = 0;
+            int totalFilters = 0;
 
-            // Limitar a 10 filtros máximo para rendimiento
-            foreach (var filter in request.Filtros
-                .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
-                       !string.IsNullOrWhiteSpace(f.Value))
-                .Take(10))
+            // 1. Procesar filtros simples (AND implícito) - COMPATIBILIDAD CON CÓDIGO EXISTENTE
+            if (request.Filtros?.Any() == true)
             {
-                filterCount++;
-                string operatorClause = GetOperatorClause(filter.Operator);
-                string column = FormatFilterColumn(filter.Key);
-
-                // Manejar operadores especiales
-                if (operatorClause == "IN" || operatorClause == "NOT IN")
+                foreach (var filter in request.Filtros
+                    .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
+                           !string.IsNullOrWhiteSpace(f.Value))
+                    .Take(10))
                 {
-                    HandleInOperatorOptimized(filter, column, operatorClause,
-                        whereClauses, parameters, ref paramCounter);
-                }
-                else if (operatorClause == "LIKE")
-                {
-                    var paramName = $"@p{paramCounter++}";
-                    whereClauses.Add($"{column} LIKE {paramName}");
+                    totalFilters++;
+                    string operatorClause = GetOperatorClause(filter.Operator);
+                    string column = FormatFilterColumn(filter.Key);
 
-                    // Optimización: LIKE con índice
-                    if (filter.Value.StartsWith("%") || filter.Value.EndsWith("%"))
+                    // Manejar operadores especiales
+                    if (operatorClause == "IN" || operatorClause == "NOT IN")
                     {
-                        parameters.Add(new SqlParameter(paramName, filter.Value));
+                        HandleInOperatorOptimized(filter, column, operatorClause,
+                            whereClauses, parameters, ref paramCounter);
+                    }
+                    else if (operatorClause == "LIKE")
+                    {
+                        var paramName = $"@p{paramCounter++}";
+                        whereClauses.Add($"{column} LIKE {paramName}");
+
+                        // Optimización: LIKE con índice
+                        if (filter.Value.StartsWith("%") || filter.Value.EndsWith("%"))
+                        {
+                            parameters.Add(new SqlParameter(paramName, filter.Value));
+                        }
+                        else
+                        {
+                            parameters.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
+                        }
+                    }
+                    else if (operatorClause == "BETWEEN")
+                    {
+                        HandleBetweenOperator(filter, column, whereClauses,
+                            parameters, ref paramCounter);
+                    }
+                    else if (operatorClause == "IS NULL" || operatorClause == "IS NOT NULL")
+                    {
+                        whereClauses.Add($"{column} {operatorClause}");
                     }
                     else
                     {
-                        parameters.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
+                        var paramName = $"@p{paramCounter++}";
+                        whereClauses.Add($"{column} {operatorClause} {paramName}");
+                        parameters.Add(CreateTypedParameter(paramName, filter.Value));
                     }
                 }
-                else if (operatorClause == "BETWEEN")
+            }
+
+            // 2. Procesar grupos AND (nueva funcionalidad)
+            if (request.FiltrosAnd?.Any() == true)
+            {
+                foreach (var grupo in request.FiltrosAnd.Take(5)) // Limitar a 5 grupos máximo
                 {
-                    HandleBetweenOperator(filter, column, whereClauses,
-                        parameters, ref paramCounter);
+                    if (grupo.Filtros?.Any() != true) continue;
+
+                    var grupoClauses = new List<string>();
+                    var grupoParams = new List<SqlParameter>();
+                    int grupoParamCounter = paramCounter;
+
+                    foreach (var filter in grupo.Filtros
+                        .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
+                               !string.IsNullOrWhiteSpace(f.Value))
+                        .Take(8)) // Limitar a 8 filtros por grupo
+                    {
+                        totalFilters++;
+                        string operatorClause = GetOperatorClause(filter.Operator);
+                        string column = FormatFilterColumn(filter.Key);
+
+                        // Manejar operadores especiales
+                        if (operatorClause == "IN" || operatorClause == "NOT IN")
+                        {
+                            var tempWhere = new List<string>();
+                            HandleInOperatorOptimized(filter, column, operatorClause,
+                                tempWhere, grupoParams, ref grupoParamCounter);
+                            if (tempWhere.Any())
+                                grupoClauses.Add(tempWhere[0]);
+                        }
+                        else if (operatorClause == "LIKE")
+                        {
+                            var paramName = $"@p{grupoParamCounter++}";
+                            grupoClauses.Add($"{column} LIKE {paramName}");
+
+                            if (filter.Value.StartsWith("%") || filter.Value.EndsWith("%"))
+                            {
+                                grupoParams.Add(new SqlParameter(paramName, filter.Value));
+                            }
+                            else
+                            {
+                                grupoParams.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
+                            }
+                        }
+                        else if (operatorClause == "BETWEEN")
+                        {
+                            var tempWhere = new List<string>();
+                            HandleBetweenOperator(filter, column, tempWhere,
+                                grupoParams, ref grupoParamCounter);
+                            if (tempWhere.Any())
+                                grupoClauses.Add(tempWhere[0]);
+                        }
+                        else if (operatorClause == "IS NULL" || operatorClause == "IS NOT NULL")
+                        {
+                            grupoClauses.Add($"{column} {operatorClause}");
+                        }
+                        else
+                        {
+                            var paramName = $"@p{grupoParamCounter++}";
+                            grupoClauses.Add($"{column} {operatorClause} {paramName}");
+                            grupoParams.Add(CreateTypedParameter(paramName, filter.Value));
+                        }
+                    }
+
+                    // Unir los filtros del grupo con el operador correspondiente
+                    if (grupoClauses.Any())
+                    {
+                        if (grupoClauses.Count > 1)
+                        {
+                            var operador = (grupo.OperadorLogico?.ToUpper() == "OR") ? " OR " : " AND ";
+                            whereClauses.Add($"({string.Join(operador, grupoClauses)})");
+                        }
+                        else
+                        {
+                            whereClauses.Add(grupoClauses[0]);
+                        }
+                        parameters.AddRange(grupoParams);
+                        paramCounter = grupoParamCounter;
+                    }
                 }
-                else
+            }
+
+            // 3. Procesar grupos OR (nueva funcionalidad)
+            if (request.FiltrosOr?.Any() == true)
+            {
+                var orGroups = new List<string>();
+                var orParams = new List<SqlParameter>();
+                int orParamCounter = paramCounter;
+
+                foreach (var grupo in request.FiltrosOr.Take(5)) // Limitar a 5 grupos máximo
                 {
-                    var paramName = $"@p{paramCounter++}";
-                    whereClauses.Add($"{column} {operatorClause} {paramName}");
-                    parameters.Add(CreateTypedParameter(paramName, filter.Value));
+                    if (grupo.Filtros?.Any() != true) continue;
+
+                    var grupoClauses = new List<string>();
+                    var grupoParams = new List<SqlParameter>();
+                    int grupoParamCounter = orParamCounter;
+
+                    foreach (var filter in grupo.Filtros
+                        .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
+                               !string.IsNullOrWhiteSpace(f.Value))
+                        .Take(8)) // Limitar a 8 filtros por grupo
+                    {
+                        totalFilters++;
+                        string operatorClause = GetOperatorClause(filter.Operator);
+                        string column = FormatFilterColumn(filter.Key);
+
+                        // Manejar operadores especiales
+                        if (operatorClause == "IN" || operatorClause == "NOT IN")
+                        {
+                            var tempWhere = new List<string>();
+                            HandleInOperatorOptimized(filter, column, operatorClause,
+                                tempWhere, grupoParams, ref grupoParamCounter);
+                            if (tempWhere.Any())
+                                grupoClauses.Add(tempWhere[0]);
+                        }
+                        else if (operatorClause == "LIKE")
+                        {
+                            var paramName = $"@p{grupoParamCounter++}";
+                            grupoClauses.Add($"{column} LIKE {paramName}");
+
+                            if (filter.Value.StartsWith("%") || filter.Value.EndsWith("%"))
+                            {
+                                grupoParams.Add(new SqlParameter(paramName, filter.Value));
+                            }
+                            else
+                            {
+                                grupoParams.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
+                            }
+                        }
+                        else if (operatorClause == "BETWEEN")
+                        {
+                            var tempWhere = new List<string>();
+                            HandleBetweenOperator(filter, column, tempWhere,
+                                grupoParams, ref grupoParamCounter);
+                            if (tempWhere.Any())
+                                grupoClauses.Add(tempWhere[0]);
+                        }
+                        else if (operatorClause == "IS NULL" || operatorClause == "IS NOT NULL")
+                        {
+                            grupoClauses.Add($"{column} {operatorClause}");
+                        }
+                        else
+                        {
+                            var paramName = $"@p{grupoParamCounter++}";
+                            grupoClauses.Add($"{column} {operatorClause} {paramName}");
+                            grupoParams.Add(CreateTypedParameter(paramName, filter.Value));
+                        }
+                    }
+
+                    // Unir los filtros dentro del grupo
+                    if (grupoClauses.Any())
+                    {
+                        if (grupoClauses.Count > 1)
+                        {
+                            var operador = (grupo.OperadorLogico?.ToUpper() == "OR") ? " OR " : " AND ";
+                            orGroups.Add($"({string.Join(operador, grupoClauses)})");
+                        }
+                        else
+                        {
+                            orGroups.Add(grupoClauses[0]);
+                        }
+                        orParams.AddRange(grupoParams);
+                        orParamCounter = grupoParamCounter;
+                    }
+                }
+
+                // Unir todos los grupos OR
+                if (orGroups.Any())
+                {
+                    if (orGroups.Count > 1)
+                    {
+                        whereClauses.Add($"({string.Join(" OR ", orGroups)})");
+                    }
+                    else
+                    {
+                        whereClauses.Add(orGroups[0]);
+                    }
+                    parameters.AddRange(orParams);
+                    paramCounter = orParamCounter;
                 }
             }
 
             _logger.LogDebug("Construidos {Count} filtros con {ParamCount} parámetros",
-                filterCount, parameters.Count);
+                totalFilters, parameters.Count);
 
             return (whereClauses, parameters);
+        }
+
+        private string BuildFinalWhereClause(List<string> whereClauses)
+        {
+            if (whereClauses.Count == 0)
+                return "";
+
+            if (whereClauses.Count == 1)
+                return $"WHERE {whereClauses[0]}";
+
+            // Para múltiples cláusulas, agrupar apropiadamente
+            var hasOrClauses = whereClauses.Any(c =>
+                c.Contains(" OR ") && !c.StartsWith("("));
+
+            if (hasOrClauses)
+            {
+                // Agrupar cláusulas que contengan OR entre paréntesis
+                var groupedClauses = whereClauses.Select(c =>
+                    c.Contains(" OR ") && !c.StartsWith("(") ? $"({c})" : c);
+                return $"WHERE {string.Join(" AND ", groupedClauses)}";
+            }
+            else
+            {
+                return $"WHERE {string.Join(" AND ", whereClauses)}";
+            }
         }
 
         private string BuildOptimizedOrderByClause(FiltrosRequest request)
@@ -666,19 +857,82 @@ namespace MyApiProject.Controllers
     int offset,
     int pageSize)
         {
-            // Asegurar ORDER BY para ROW_NUMBER
-            if (string.IsNullOrEmpty(orderByClause))
-            {
-                var orderColumn = ExtractFirstGroupColumn(groupByClause);
-                if (string.IsNullOrEmpty(orderColumn))
-                {
-                    // Si no hay GROUP BY, buscar la primera columna del SELECT
-                    orderColumn = ExtractFirstSelectColumn(selectClause) ?? "(SELECT NULL)";
-                }
-                orderByClause = $"ORDER BY {orderColumn}";
-            }
+            // Verificar si el SELECT ya incluye DISTINCT
+            bool hasDistinct = selectClause.TrimStart().StartsWith("DISTINCT", StringComparison.OrdinalIgnoreCase);
 
-            return $@"
+            // Si tiene DISTINCT, necesitamos un enfoque diferente
+            if (hasDistinct)
+            {
+                // Remover DISTINCT del SELECT para usarlo en el ROW_NUMBER
+                var selectWithoutDistinct = selectClause.Trim();
+                if (selectWithoutDistinct.StartsWith("DISTINCT", StringComparison.OrdinalIgnoreCase))
+                {
+                    selectWithoutDistinct = selectWithoutDistinct.Substring(8).Trim();
+                }
+
+                // Asegurar que cada columna tenga un alias explícito
+                var columns = selectWithoutDistinct.Split(',')
+                    .Select((col, index) =>
+                    {
+                        var trimmedCol = col.Trim();
+                        // Si ya tiene alias, mantenerlo
+                        if (trimmedCol.Contains(" AS ", StringComparison.OrdinalIgnoreCase) ||
+                            trimmedCol.Contains(" as ", StringComparison.OrdinalIgnoreCase))
+                            return trimmedCol;
+
+                        // Si es una columna simple con corchetes, usar como alias
+                        if (trimmedCol.StartsWith("[") && trimmedCol.EndsWith("]"))
+                        {
+                            var colName = trimmedCol.Trim('[', ']');
+                            return $"{trimmedCol} AS [{colName.Replace(".", "_")}]";
+                        }
+
+                        // Dar un alias por defecto
+                        return $"{trimmedCol} AS [Column{index + 1}]";
+                    })
+                    .ToList();
+
+                var selectWithAliases = string.Join(", ", columns);
+
+                // Asegurar ORDER BY
+                if (string.IsNullOrEmpty(orderByClause))
+                {
+                    // Usar el primer alias o columna
+                    var firstColumn = columns.First();
+                    var orderByCol = firstColumn.Contains(" AS ")
+                        ? firstColumn.Split(new[] { " AS " }, StringSplitOptions.RemoveEmptyEntries).Last().Trim()
+                        : firstColumn.Split(',').First().Trim();
+                    orderByClause = $"ORDER BY {orderByCol}";
+                }
+
+                return $@"
+        SELECT {selectClause}
+        FROM (
+            SELECT {selectWithAliases},
+            ROW_NUMBER() OVER ({orderByClause}) AS row
+            FROM {table}
+            {whereQuery}
+            {groupByClause}
+        ) AS NumberedRows
+        WHERE row > {offset} AND row <= {offset + pageSize}
+        ORDER BY row";
+            }
+            else
+            {
+                // Código original para consultas sin DISTINCT...
+                // Asegurar ORDER BY para ROW_NUMBER
+                if (string.IsNullOrEmpty(orderByClause))
+                {
+                    var orderColumn = ExtractFirstGroupColumn(groupByClause);
+                    if (string.IsNullOrEmpty(orderColumn))
+                    {
+                        // Si no hay GROUP BY, buscar la primera columna del SELECT
+                        orderColumn = ExtractFirstSelectColumn(selectClause) ?? "(SELECT NULL)";
+                    }
+                    orderByClause = $"ORDER BY {orderColumn}";
+                }
+
+                return $@"
         SELECT *
         FROM (
             SELECT {selectClause},
@@ -689,6 +943,7 @@ namespace MyApiProject.Controllers
         ) AS NumberedRows
         WHERE row > {offset} AND row <= {offset + pageSize}
         ORDER BY row";
+            }
         }
 
         private string BuildCTEPaginationQuery(
@@ -740,6 +995,12 @@ namespace MyApiProject.Controllers
                     cleanSelect = cleanSelect.Substring(6).Trim();
                 }
 
+                // Eliminar DISTINCT si existe
+                if (cleanSelect.StartsWith("DISTINCT", StringComparison.OrdinalIgnoreCase))
+                {
+                    cleanSelect = cleanSelect.Substring(8).Trim();
+                }
+
                 // Tomar la primera parte antes de la primera coma
                 var firstColumn = cleanSelect.Split(',')[0].Trim();
 
@@ -749,7 +1010,6 @@ namespace MyApiProject.Controllers
                     var parts = firstColumn.Split(new[] { " AS " }, StringSplitOptions.RemoveEmptyEntries);
                     if (parts.Length > 0)
                     {
-                        // Tomar la expresión antes del AS
                         firstColumn = parts[0].Trim();
                     }
                 }
@@ -762,13 +1022,11 @@ namespace MyApiProject.Controllers
                     }
                 }
 
-                // Si la columna tiene alias entre corchetes, extraer el contenido
                 if (firstColumn.StartsWith("[") && firstColumn.EndsWith("]"))
                 {
                     return firstColumn;
                 }
 
-                // Si es una expresión compleja, devolver null
                 if (IsComplexExpression(firstColumn))
                 {
                     return null;
@@ -781,8 +1039,6 @@ namespace MyApiProject.Controllers
                 return null;
             }
         }
-
-
         private string BuildTempTableCreationQuery(
             string selectClause,
             string table,
@@ -831,10 +1087,10 @@ namespace MyApiProject.Controllers
         }
 
         private async Task<List<Dictionary<string, object>>> ExecuteOptimizedQuery(
-            SqlConnection connection,
-            string query,
-            List<SqlParameter> parameters,
-            int expectedPageSize)
+    SqlConnection connection,
+    string query,
+    List<SqlParameter> parameters,
+    int expectedPageSize)
         {
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -846,6 +1102,9 @@ namespace MyApiProject.Controllers
                 command.CommandTimeout = CalculateTimeout(query, parameters?.Count ?? 0);
 
                 AddParametersOptimized(command, parameters);
+
+                // DEBUG: Log la query generada
+                _logger.LogDebug("Query generada: {Query}", query);
 
 #if DEBUG
                 LogQueryDetails(query, parameters);
@@ -867,7 +1126,6 @@ namespace MyApiProject.Controllers
 
                     results.Add(row);
 
-                    // Parar si obtenemos más del doble del tamaño esperado
                     if (results.Count >= expectedPageSize * 2)
                         break;
                 }
@@ -992,15 +1250,17 @@ namespace MyApiProject.Controllers
         private string GetAggregationOperation(string? operation)
         {
             if (string.IsNullOrWhiteSpace(operation))
-                return "COUNT";
+                return ""; // Cambiado de "COUNT" a vacío
 
             var opUpper = operation.ToUpper().Trim();
 
+            // Manejar COUNT(DISTINCT ...)
             if (opUpper.Contains("COUNT DISTINCT") || opUpper.Contains("COUNT(DISTINCT"))
                 return "COUNT DISTINCT";
 
+            // Manejar DISTINCT simple
             if (opUpper == "DISTINCT")
-                return "DISTINCT";
+                return "DISTINCT"; // Esto es crucial
 
             return opUpper switch
             {
@@ -1141,7 +1401,7 @@ namespace MyApiProject.Controllers
             if (bool.TryParse(value, out bool boolValue))
                 return new SqlParameter(name, SqlDbType.Bit) { Value = boolValue };
 
-            return new SqlParameter(name, SqlDbType.NVarChar, value.Length) { Value = value };
+            return new SqlParameter(name, SqlDbType.NVarChar, Math.Min(value.Length, 4000)) { Value = value };
         }
 
         #endregion
