@@ -863,63 +863,60 @@ namespace MyApiProject.Controllers
             // Si tiene DISTINCT, necesitamos un enfoque diferente
             if (hasDistinct)
             {
-                // Remover DISTINCT del SELECT para usarlo en el ROW_NUMBER
+                // Extraer las columnas después del DISTINCT
                 var selectWithoutDistinct = selectClause.Trim();
                 if (selectWithoutDistinct.StartsWith("DISTINCT", StringComparison.OrdinalIgnoreCase))
                 {
                     selectWithoutDistinct = selectWithoutDistinct.Substring(8).Trim();
                 }
 
-                // Asegurar que cada columna tenga un alias explícito
-                var columns = selectWithoutDistinct.Split(',')
-                    .Select((col, index) =>
-                    {
-                        var trimmedCol = col.Trim();
-                        // Si ya tiene alias, mantenerlo
-                        if (trimmedCol.Contains(" AS ", StringComparison.OrdinalIgnoreCase) ||
-                            trimmedCol.Contains(" as ", StringComparison.OrdinalIgnoreCase))
-                            return trimmedCol;
+                // Extraer solo los nombres de los alias para la consulta externa
+                var externalColumns = ExtractColumnAliases(selectWithoutDistinct);
 
-                        // Si es una columna simple con corchetes, usar como alias
-                        if (trimmedCol.StartsWith("[") && trimmedCol.EndsWith("]"))
-                        {
-                            var colName = trimmedCol.Trim('[', ']');
-                            return $"{trimmedCol} AS [{colName.Replace(".", "_")}]";
-                        }
+                // Extraer los alias para el ORDER BY final
+                var orderByAliases = GetOrderByAliases(selectWithoutDistinct);
 
-                        // Dar un alias por defecto
-                        return $"{trimmedCol} AS [Column{index + 1}]";
-                    })
-                    .ToList();
-
-                var selectWithAliases = string.Join(", ", columns);
-
-                // Asegurar ORDER BY
+                // Asegurar ORDER BY para la subconsulta interna (ROW_NUMBER)
+                string innerOrderByClause;
                 if (string.IsNullOrEmpty(orderByClause))
                 {
-                    // Usar el primer alias o columna
-                    var firstColumn = columns.First();
-                    var orderByCol = firstColumn.Contains(" AS ")
-                        ? firstColumn.Split(new[] { " AS " }, StringSplitOptions.RemoveEmptyEntries).Last().Trim()
-                        : firstColumn.Split(',').First().Trim();
-                    orderByClause = $"ORDER BY {orderByCol}";
+                    // Usar las columnas reales, no los alias, para el ORDER BY de ROW_NUMBER
+                    var firstColumn = ExtractFirstSelectColumn(selectWithoutDistinct);
+                    if (!string.IsNullOrEmpty(firstColumn))
+                    {
+                        innerOrderByClause = $"ORDER BY {firstColumn}";
+                    }
+                    else
+                    {
+                        innerOrderByClause = "ORDER BY (SELECT NULL)";
+                    }
+                }
+                else
+                {
+                    // Para consultas DISTINCT, el ORDER BY de ROW_NUMBER debe usar las columnas originales
+                    innerOrderByClause = ConvertOrderByToOriginalColumns(orderByClause, selectWithoutDistinct);
                 }
 
+                // El ORDER BY final debe usar los alias de la consulta externa
+                string finalOrderBy = !string.IsNullOrEmpty(orderByAliases)
+                    ? $"ORDER BY {orderByAliases}"
+                    : $"ORDER BY {ExtractFirstAlias(selectWithoutDistinct) ?? "row"}";
+
                 return $@"
-        SELECT {selectClause}
+        SELECT DISTINCT {externalColumns}
         FROM (
-            SELECT {selectWithAliases},
-            ROW_NUMBER() OVER ({orderByClause}) AS row
+            SELECT {selectWithoutDistinct},
+            ROW_NUMBER() OVER ({innerOrderByClause}) AS row
             FROM {table}
             {whereQuery}
             {groupByClause}
         ) AS NumberedRows
         WHERE row > {offset} AND row <= {offset + pageSize}
-        ORDER BY row";
+        {finalOrderBy}";
             }
             else
             {
-                // Código original para consultas sin DISTINCT...
+                // Código original para consultas sin DISTINCT
                 // Asegurar ORDER BY para ROW_NUMBER
                 if (string.IsNullOrEmpty(orderByClause))
                 {
@@ -944,6 +941,254 @@ namespace MyApiProject.Controllers
         WHERE row > {offset} AND row <= {offset + pageSize}
         ORDER BY row";
             }
+        }
+
+        private string ConvertOrderByToOriginalColumns(string orderByClause, string selectClause)
+        {
+            if (string.IsNullOrEmpty(orderByClause))
+                return orderByClause;
+
+            // Extraer las partes del ORDER BY
+            var orderByParts = orderByClause
+                .Replace("ORDER BY", "")
+                .Split(',')
+                .Select(p => p.Trim())
+                .ToList();
+
+            var resultParts = new List<string>();
+
+            foreach (var part in orderByParts)
+            {
+                var columnPart = part.Split(' ')[0]; // Tomar solo el nombre de la columna
+                var direction = part.Contains(" DESC", StringComparison.OrdinalIgnoreCase) ? "DESC" : "ASC";
+
+                // Buscar si esta columna es un alias en el SELECT
+                var originalColumn = FindOriginalColumnForAlias(columnPart, selectClause);
+
+                if (!string.IsNullOrEmpty(originalColumn))
+                {
+                    resultParts.Add($"{originalColumn} {direction}");
+                }
+                else
+                {
+                    // Si no es un alias, usar la columna tal cual
+                    resultParts.Add($"{columnPart} {direction}");
+                }
+            }
+
+            return $"ORDER BY {string.Join(", ", resultParts)}";
+        }
+
+        private string FindOriginalColumnForAlias(string alias, string selectClause)
+        {
+            if (string.IsNullOrEmpty(alias) || string.IsNullOrEmpty(selectClause))
+                return null;
+
+            // Buscar en las columnas del SELECT para encontrar el alias
+            var columns = SplitSelectClause(selectClause);
+
+            foreach (var column in columns)
+            {
+                var trimmedColumn = column.Trim();
+
+                // Buscar "AS alias" o "as alias"
+                if (trimmedColumn.Contains(" AS ", StringComparison.OrdinalIgnoreCase))
+                {
+                    var parts = trimmedColumn.Split(new[] { " AS " }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length > 1)
+                    {
+                        var columnAlias = parts[1].Trim().Trim('[', ']');
+                        if (columnAlias.Equals(alias.Trim('[', ']'), StringComparison.OrdinalIgnoreCase))
+                        {
+                            return parts[0].Trim(); // Retornar la columna original
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private string GetOrderByAliases(string selectClause)
+        {
+            if (string.IsNullOrEmpty(selectClause))
+                return string.Empty;
+
+            var columns = SplitSelectClause(selectClause);
+            var aliases = new List<string>();
+
+            foreach (var column in columns)
+            {
+                var trimmedColumn = column.Trim();
+
+                if (trimmedColumn.Contains(" AS ", StringComparison.OrdinalIgnoreCase))
+                {
+                    var parts = trimmedColumn.Split(new[] { " AS " }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length > 1)
+                    {
+                        var alias = parts[1].Trim();
+                        if (!alias.StartsWith("[") && !alias.EndsWith("]"))
+                        {
+                            alias = $"[{alias}]";
+                        }
+                        aliases.Add(alias);
+                    }
+                }
+                else if (trimmedColumn.Contains(" as ", StringComparison.OrdinalIgnoreCase))
+                {
+                    var parts = trimmedColumn.Split(new[] { " as " }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length > 1)
+                    {
+                        var alias = parts[1].Trim();
+                        if (!alias.StartsWith("[") && !alias.EndsWith("]"))
+                        {
+                            alias = $"[{alias}]";
+                        }
+                        aliases.Add(alias);
+                    }
+                }
+            }
+
+            return aliases.Any() ? string.Join(", ", aliases) : string.Empty;
+        }
+
+        private string ExtractFirstAlias(string selectClause)
+        {
+            if (string.IsNullOrEmpty(selectClause))
+                return null;
+
+            var columns = SplitSelectClause(selectClause);
+
+            if (!columns.Any())
+                return null;
+
+            var firstColumn = columns.First().Trim();
+
+            if (firstColumn.Contains(" AS ", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = firstColumn.Split(new[] { " AS " }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length > 1)
+                {
+                    var alias = parts[1].Trim();
+                    if (!alias.StartsWith("[") && !alias.EndsWith("]"))
+                    {
+                        alias = $"[{alias}]";
+                    }
+                    return alias;
+                }
+            }
+            else if (firstColumn.Contains(" as ", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = firstColumn.Split(new[] { " as " }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length > 1)
+                {
+                    var alias = parts[1].Trim();
+                    if (!alias.StartsWith("[") && !alias.EndsWith("]"))
+                    {
+                        alias = $"[{alias}]";
+                    }
+                    return alias;
+                }
+            }
+
+            return null;
+        }
+        private string ExtractColumnAliases(string selectClause)
+        {
+            if (string.IsNullOrEmpty(selectClause))
+                return "*";
+
+            try
+            {
+                var columns = new List<string>();
+
+                // Dividir por comas, pero teniendo en cuenta paréntesis
+                var parts = SplitSelectClause(selectClause);
+
+                foreach (var part in parts)
+                {
+                    var trimmedPart = part.Trim();
+
+                    // Extraer el alias si existe
+                    if (trimmedPart.Contains(" AS ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var aliasParts = trimmedPart.Split(new[] { " AS " }, StringSplitOptions.RemoveEmptyEntries);
+                        if (aliasParts.Length > 1)
+                        {
+                            // Tomar solo el alias, asegurando que esté entre corchetes si no lo está
+                            var alias = aliasParts[1].Trim();
+                            if (!alias.StartsWith("[") && !alias.EndsWith("]"))
+                            {
+                                alias = $"[{alias}]";
+                            }
+                            columns.Add(alias);
+                        }
+                        else
+                        {
+                            columns.Add(trimmedPart);
+                        }
+                    }
+                    else if (trimmedPart.Contains(" as ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var aliasParts = trimmedPart.Split(new[] { " as " }, StringSplitOptions.RemoveEmptyEntries);
+                        if (aliasParts.Length > 1)
+                        {
+                            var alias = aliasParts[1].Trim();
+                            if (!alias.StartsWith("[") && !alias.EndsWith("]"))
+                            {
+                                alias = $"[{alias}]";
+                            }
+                            columns.Add(alias);
+                        }
+                        else
+                        {
+                            columns.Add(trimmedPart);
+                        }
+                    }
+                    else
+                    {
+                        // Si no tiene alias, usar la columna completa
+                        columns.Add(trimmedPart);
+                    }
+                }
+
+                return string.Join(", ", columns);
+            }
+            catch
+            {
+                // Fallback: usar la cláusula completa
+                return selectClause;
+            }
+        }
+
+        private List<string> SplitSelectClause(string selectClause)
+        {
+            var result = new List<string>();
+            var currentPart = new StringBuilder();
+            int parenthesisCount = 0;
+
+            foreach (char c in selectClause)
+            {
+                if (c == '(') parenthesisCount++;
+                else if (c == ')') parenthesisCount--;
+
+                if (c == ',' && parenthesisCount == 0)
+                {
+                    result.Add(currentPart.ToString());
+                    currentPart.Clear();
+                }
+                else
+                {
+                    currentPart.Append(c);
+                }
+            }
+
+            if (currentPart.Length > 0)
+            {
+                result.Add(currentPart.ToString());
+            }
+
+            return result;
         }
 
         private string BuildCTEPaginationQuery(
@@ -1004,7 +1249,8 @@ namespace MyApiProject.Controllers
                 // Tomar la primera parte antes de la primera coma
                 var firstColumn = cleanSelect.Split(',')[0].Trim();
 
-                // Extraer el nombre de columna eliminando alias
+                // Si la columna tiene alias, extraer solo la expresión de columna
+                // Ej: [art].[Descripcion1] AS [Suggestion] → [art].[Descripcion1]
                 if (firstColumn.Contains(" AS ", StringComparison.OrdinalIgnoreCase))
                 {
                     var parts = firstColumn.Split(new[] { " AS " }, StringSplitOptions.RemoveEmptyEntries);
@@ -1022,12 +1268,8 @@ namespace MyApiProject.Controllers
                     }
                 }
 
-                if (firstColumn.StartsWith("[") && firstColumn.EndsWith("]"))
-                {
-                    return firstColumn;
-                }
-
-                if (IsComplexExpression(firstColumn))
+                // Asegurar que sea una columna válida
+                if (string.IsNullOrWhiteSpace(firstColumn) || IsComplexExpression(firstColumn))
                 {
                     return null;
                 }
