@@ -232,6 +232,7 @@ namespace MyApiProject.Controllers
                             ? $"AS [{agg.Alias}]"
                             : "";
                         selectParts.Add($"COUNT(DISTINCT {distinctColumn}) {alias}");
+                        hasAggregations = true; // COUNT es una agregación
                         continue;
                     }
 
@@ -246,6 +247,9 @@ namespace MyApiProject.Controllers
                                 ? $"AS [{agg.Alias}]"
                                 : "";
                             selectParts.Add($"{columnExpression} {alias}");
+
+                            // Agregar a distinctColumns para GROUP BY
+                            distinctColumns.Add(columnExpression);
                         }
                         continue;
                     }
@@ -255,6 +259,7 @@ namespace MyApiProject.Controllers
                         ? $"AS [{agg.Alias}]"
                         : "";
                     selectParts.Add($"{operation}({columnExpression}) {aggAlias}");
+                    hasAggregations = true;
                 }
             }
 
@@ -279,6 +284,7 @@ namespace MyApiProject.Controllers
 
             if (hasAggregations && groupByParts.Any())
             {
+                // Si hay agregaciones, usar GROUP BY con las columnas no agregadas
                 var validGroupByColumns = groupByParts
                     .Where(g => !IsComplexExpression(g))
                     .Distinct()
@@ -289,9 +295,92 @@ namespace MyApiProject.Controllers
                     groupByClause = $"GROUP BY {string.Join(", ", validGroupByColumns)}";
                 }
             }
-            // NOTA: Si solo hay DISTINCT sin GROUP BY, dejamos groupByClause vacío
+            else if (hasDistinct && !hasAggregations && distinctColumns.Any())
+            {
+                // Para DISTINCT sin agregaciones, crear GROUP BY con todas las columnas DISTINCT
+                // Esto es equivalente a SELECT DISTINCT pero más eficiente en algunos casos
+                var validDistinctColumns = distinctColumns
+                    .Where(g => !IsComplexExpression(g))
+                    .Distinct()
+                    .ToList();
+
+                if (validDistinctColumns.Any())
+                {
+                    // Si hay columnas DISTINCT específicas, agrupar por ellas
+                    groupByClause = $"GROUP BY {string.Join(", ", validDistinctColumns)}";
+                }
+                else if (selectClause.StartsWith("DISTINCT"))
+                {
+                    // Si es SELECT DISTINCT *, extraer las columnas reales de la consulta
+                    var actualColumns = ExtractActualColumnsFromDistinct(selectClause);
+                    if (actualColumns.Any())
+                    {
+                        groupByClause = $"GROUP BY {string.Join(", ", actualColumns)}";
+                    }
+                }
+            }
 
             return (selectClause, groupByClause);
+        }
+
+        // Método helper para extraer columnas de un SELECT DISTINCT
+        private List<string> ExtractActualColumnsFromDistinct(string selectClause)
+        {
+            var columns = new List<string>();
+
+            try
+            {
+                // Remover "DISTINCT" del inicio
+                var withoutDistinct = selectClause.Trim();
+                if (withoutDistinct.StartsWith("DISTINCT", StringComparison.OrdinalIgnoreCase))
+                {
+                    withoutDistinct = withoutDistinct.Substring(8).Trim();
+                }
+
+                // Parsear las columnas
+                if (withoutDistinct == "*")
+                {
+                    // No podemos determinar columnas específicas para *
+                    return columns;
+                }
+
+                // Dividir por comas, ignorando comas dentro de paréntesis
+                int parenCount = 0;
+                var currentColumn = new StringBuilder();
+
+                foreach (char c in withoutDistinct)
+                {
+                    if (c == '(') parenCount++;
+                    else if (c == ')') parenCount--;
+
+                    if (c == ',' && parenCount == 0)
+                    {
+                        var column = currentColumn.ToString().Trim();
+                        if (!string.IsNullOrEmpty(column) && !IsComplexExpression(column))
+                        {
+                            columns.Add(column);
+                        }
+                        currentColumn.Clear();
+                    }
+                    else
+                    {
+                        currentColumn.Append(c);
+                    }
+                }
+
+                // Última columna
+                var lastColumn = currentColumn.ToString().Trim();
+                if (!string.IsNullOrEmpty(lastColumn) && !IsComplexExpression(lastColumn))
+                {
+                    columns.Add(lastColumn);
+                }
+            }
+            catch
+            {
+                // En caso de error, retornar lista vacía
+            }
+
+            return columns;
         }
 
         private (List<string> whereClauses, List<SqlParameter> parameters) BuildOptimizedFilters(FiltrosRequest request)
@@ -330,15 +419,17 @@ namespace MyApiProject.Controllers
                         var paramName = $"@p{paramCounter++}";
                         whereClauses.Add($"{column} LIKE {paramName}");
 
-                        // Optimización: LIKE con índice
-                        if (filter.Value.StartsWith("%") || filter.Value.EndsWith("%"))
+                        // Si el valor YA contiene wildcards, usarlo tal cual
+                        // De lo contrario, agregar % al principio y final
+                        string likeValue = filter.Value;
+
+                        if (!likeValue.Contains("%") && !likeValue.Contains("_"))
                         {
-                            parameters.Add(new SqlParameter(paramName, filter.Value));
+                            // Solo agregar wildcards si el usuario no los especificó
+                            likeValue = $"%{likeValue}%";
                         }
-                        else
-                        {
-                            parameters.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
-                        }
+
+                        parameters.Add(new SqlParameter(paramName, likeValue));
                     }
                     else if (operatorClause == "BETWEEN")
                     {
