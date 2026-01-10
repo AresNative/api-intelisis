@@ -402,7 +402,7 @@ namespace MyApiProject.Controllers
                 foreach (var filter in request.Filtros
                     .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
                            !string.IsNullOrWhiteSpace(f.Value))
-                    .Take(10))
+                    )
                 {
                     totalFilters++;
                     string operatorClause = GetOperatorClause(filter.Operator);
@@ -450,9 +450,10 @@ namespace MyApiProject.Controllers
             }
 
             // 2. Procesar grupos AND (nueva funcionalidad)
+            var andGroups = new List<string>();
             if (request.FiltrosAnd?.Any() == true)
             {
-                foreach (var grupo in request.FiltrosAnd.Take(5)) // Limitar a 5 grupos máximo
+                foreach (var grupo in request.FiltrosAnd.Take(5))
                 {
                     if (grupo.Filtros?.Any() != true) continue;
 
@@ -463,22 +464,16 @@ namespace MyApiProject.Controllers
                     foreach (var filter in grupo.Filtros
                         .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
                                !string.IsNullOrWhiteSpace(f.Value))
-                        .Take(8)) // Limitar a 8 filtros por grupo
+                        .Take(8))
                     {
                         totalFilters++;
                         string operatorClause = GetOperatorClause(filter.Operator);
                         string column = FormatFilterColumn(filter.Key);
 
+                        // ... (código para procesar cada filtro)
+
                         // Manejar operadores especiales
-                        if (operatorClause == "IN" || operatorClause == "NOT IN")
-                        {
-                            var tempWhere = new List<string>();
-                            HandleInOperatorOptimized(filter, column, operatorClause,
-                                tempWhere, grupoParams, ref grupoParamCounter);
-                            if (tempWhere.Any())
-                                grupoClauses.Add(tempWhere[0]);
-                        }
-                        else if (operatorClause == "LIKE")
+                        if (operatorClause == "LIKE")
                         {
                             var paramName = $"@p{grupoParamCounter++}";
                             grupoClauses.Add($"{column} LIKE {paramName}");
@@ -492,18 +487,6 @@ namespace MyApiProject.Controllers
                                 grupoParams.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
                             }
                         }
-                        else if (operatorClause == "BETWEEN")
-                        {
-                            var tempWhere = new List<string>();
-                            HandleBetweenOperator(filter, column, tempWhere,
-                                grupoParams, ref grupoParamCounter);
-                            if (tempWhere.Any())
-                                grupoClauses.Add(tempWhere[0]);
-                        }
-                        else if (operatorClause == "IS NULL" || operatorClause == "IS NOT NULL")
-                        {
-                            grupoClauses.Add($"{column} {operatorClause}");
-                        }
                         else
                         {
                             var paramName = $"@p{grupoParamCounter++}";
@@ -512,17 +495,17 @@ namespace MyApiProject.Controllers
                         }
                     }
 
-                    // Unir los filtros del grupo con el operador correspondiente
                     if (grupoClauses.Any())
                     {
                         if (grupoClauses.Count > 1)
                         {
+                            // Los filtros dentro del grupo se combinan según OperadorLogico
                             var operador = (grupo.OperadorLogico?.ToUpper() == "OR") ? " OR " : " AND ";
-                            whereClauses.Add($"({string.Join(operador, grupoClauses)})");
+                            andGroups.Add($"({string.Join(operador, grupoClauses)})");
                         }
                         else
                         {
-                            whereClauses.Add(grupoClauses[0]);
+                            andGroups.Add(grupoClauses[0]);
                         }
                         parameters.AddRange(grupoParams);
                         paramCounter = grupoParamCounter;
@@ -530,40 +513,30 @@ namespace MyApiProject.Controllers
                 }
             }
 
-            // 3. Procesar grupos OR (nueva funcionalidad)
+            // 3. Procesar grupos OR - estos se combinarán con OR con los grupos AND
+            var orGroups = new List<string>();
             if (request.FiltrosOr?.Any() == true)
             {
-                var orGroups = new List<string>();
-                var orParams = new List<SqlParameter>();
-                int orParamCounter = paramCounter;
-
-                foreach (var grupo in request.FiltrosOr.Take(5)) // Limitar a 5 grupos máximo
+                foreach (var grupo in request.FiltrosOr.Take(5))
                 {
                     if (grupo.Filtros?.Any() != true) continue;
 
                     var grupoClauses = new List<string>();
                     var grupoParams = new List<SqlParameter>();
-                    int grupoParamCounter = orParamCounter;
+                    int grupoParamCounter = paramCounter;
 
                     foreach (var filter in grupo.Filtros
                         .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
                                !string.IsNullOrWhiteSpace(f.Value))
-                        .Take(8)) // Limitar a 8 filtros por grupo
+                        .Take(8))
                     {
                         totalFilters++;
                         string operatorClause = GetOperatorClause(filter.Operator);
                         string column = FormatFilterColumn(filter.Key);
 
-                        // Manejar operadores especiales
-                        if (operatorClause == "IN" || operatorClause == "NOT IN")
-                        {
-                            var tempWhere = new List<string>();
-                            HandleInOperatorOptimized(filter, column, operatorClause,
-                                tempWhere, grupoParams, ref grupoParamCounter);
-                            if (tempWhere.Any())
-                                grupoClauses.Add(tempWhere[0]);
-                        }
-                        else if (operatorClause == "LIKE")
+                        // ... (código para procesar cada filtro)
+
+                        if (operatorClause == "LIKE")
                         {
                             var paramName = $"@p{grupoParamCounter++}";
                             grupoClauses.Add($"{column} LIKE {paramName}");
@@ -577,18 +550,6 @@ namespace MyApiProject.Controllers
                                 grupoParams.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
                             }
                         }
-                        else if (operatorClause == "BETWEEN")
-                        {
-                            var tempWhere = new List<string>();
-                            HandleBetweenOperator(filter, column, tempWhere,
-                                grupoParams, ref grupoParamCounter);
-                            if (tempWhere.Any())
-                                grupoClauses.Add(tempWhere[0]);
-                        }
-                        else if (operatorClause == "IS NULL" || operatorClause == "IS NOT NULL")
-                        {
-                            grupoClauses.Add($"{column} {operatorClause}");
-                        }
                         else
                         {
                             var paramName = $"@p{grupoParamCounter++}";
@@ -597,7 +558,6 @@ namespace MyApiProject.Controllers
                         }
                     }
 
-                    // Unir los filtros dentro del grupo
                     if (grupoClauses.Any())
                     {
                         if (grupoClauses.Count > 1)
@@ -609,14 +569,48 @@ namespace MyApiProject.Controllers
                         {
                             orGroups.Add(grupoClauses[0]);
                         }
-                        orParams.AddRange(grupoParams);
-                        orParamCounter = grupoParamCounter;
+                        parameters.AddRange(grupoParams);
+                        paramCounter = grupoParamCounter;
                     }
                 }
+            }
 
-                // Unir todos los grupos OR
-                if (orGroups.Any())
+            // 4. Combinar todos los grupos en la cláusula WHERE final
+            // Primero, combinar todos los grupos AND
+            if (andGroups.Any())
+            {
+                if (andGroups.Count > 1)
                 {
+                    whereClauses.Add($"({string.Join(" AND ", andGroups)})");
+                }
+                else
+                {
+                    whereClauses.Add(andGroups[0]);
+                }
+            }
+
+            // Luego, agregar los grupos OR
+            // La clave está aquí: si hay grupos OR, combinarlos con OR con la condición AND existente
+            if (orGroups.Any())
+            {
+                if (whereClauses.Any())
+                {
+                    // Si ya hay cláusulas AND, combinarlas con OR
+                    string combinedAnd = whereClauses[0];
+
+                    if (orGroups.Count > 1)
+                    {
+                        string combinedOr = $"({string.Join(" OR ", orGroups)})";
+                        whereClauses[0] = $"({combinedAnd} OR {combinedOr})";
+                    }
+                    else
+                    {
+                        whereClauses[0] = $"({combinedAnd} OR {orGroups[0]})";
+                    }
+                }
+                else
+                {
+                    // Si no hay cláusulas AND, usar solo las OR
                     if (orGroups.Count > 1)
                     {
                         whereClauses.Add($"({string.Join(" OR ", orGroups)})");
@@ -625,8 +619,6 @@ namespace MyApiProject.Controllers
                     {
                         whereClauses.Add(orGroups[0]);
                     }
-                    parameters.AddRange(orParams);
-                    paramCounter = orParamCounter;
                 }
             }
 
@@ -644,21 +636,13 @@ namespace MyApiProject.Controllers
             if (whereClauses.Count == 1)
                 return $"WHERE {whereClauses[0]}";
 
-            // Para múltiples cláusulas, agrupar apropiadamente
-            var hasOrClauses = whereClauses.Any(c =>
-                c.Contains(" OR ") && !c.StartsWith("("));
+            var hasOrGroups = whereClauses.Any(c =>
+                c.Contains(" OR ") || c.StartsWith("(") || whereClauses.Count > 1);
 
-            if (hasOrClauses)
-            {
-                // Agrupar cláusulas que contengan OR entre paréntesis
-                var groupedClauses = whereClauses.Select(c =>
-                    c.Contains(" OR ") && !c.StartsWith("(") ? $"({c})" : c);
-                return $"WHERE {string.Join(" AND ", groupedClauses)}";
-            }
-            else
-            {
-                return $"WHERE {string.Join(" AND ", whereClauses)}";
-            }
+            var groupedClauses = whereClauses.Select(c =>
+                (c.Contains(" OR ") || c.Contains(" AND ")) && !c.StartsWith("(") ? $"({c})" : c);
+
+            return $"WHERE {string.Join(" AND ", groupedClauses)}";
         }
 
         private string BuildOptimizedOrderByClause(FiltrosRequest request)
@@ -671,7 +655,7 @@ namespace MyApiProject.Controllers
             // Limitar a 3 columnas de orden para rendimiento
             foreach (var order in request.Order
                 .Where(o => !string.IsNullOrWhiteSpace(o.Key))
-                .Take(3))
+                )
             {
                 var direction = !string.IsNullOrWhiteSpace(order.Direction) &&
                                order.Direction.ToUpper() == "DESC" ? "DESC" : "ASC";
@@ -1755,7 +1739,6 @@ namespace MyApiProject.Controllers
                     .Select(v => v.Trim())
                     .Where(v => !string.IsNullOrEmpty(v))
                     .Distinct() // Eliminar duplicados
-                    .Take(50)   // Limitar a 50 valores máximo
                     .ToArray();
 
                 if (values.Length == 0) return;
@@ -1909,7 +1892,6 @@ namespace MyApiProject.Controllers
                 .Split(',')
                 .Select(c => c.Trim())
                 .Where(c => !string.IsNullOrEmpty(c) && !IsComplexExpression(c))
-                .Take(2)
                 .ToArray();
         }
 
