@@ -396,64 +396,13 @@ namespace MyApiProject.Controllers
             int paramCounter = 0;
             int totalFilters = 0;
 
-            // 1. Procesar filtros simples (AND implícito) - COMPATIBILIDAD CON CÓDIGO EXISTENTE
-            if (request.Filtros?.Any() == true)
-            {
-                foreach (var filter in request.Filtros
-                    .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
-                           !string.IsNullOrWhiteSpace(f.Value))
-                    )
-                {
-                    totalFilters++;
-                    string operatorClause = GetOperatorClause(filter.Operator);
-                    string column = FormatFilterColumn(filter.Key);
-
-                    // Manejar operadores especiales
-                    if (operatorClause == "IN" || operatorClause == "NOT IN")
-                    {
-                        HandleInOperatorOptimized(filter, column, operatorClause,
-                            whereClauses, parameters, ref paramCounter);
-                    }
-                    else if (operatorClause == "LIKE")
-                    {
-                        var paramName = $"@p{paramCounter++}";
-                        whereClauses.Add($"{column} LIKE {paramName}");
-
-                        // Si el valor YA contiene wildcards, usarlo tal cual
-                        // De lo contrario, agregar % al principio y final
-                        string likeValue = filter.Value;
-
-                        if (!likeValue.Contains("%") && !likeValue.Contains("_"))
-                        {
-                            // Solo agregar wildcards si el usuario no los especificó
-                            likeValue = $"%{likeValue}%";
-                        }
-
-                        parameters.Add(new SqlParameter(paramName, likeValue));
-                    }
-                    else if (operatorClause == "BETWEEN")
-                    {
-                        HandleBetweenOperator(filter, column, whereClauses,
-                            parameters, ref paramCounter);
-                    }
-                    else if (operatorClause == "IS NULL" || operatorClause == "IS NOT NULL")
-                    {
-                        whereClauses.Add($"{column} {operatorClause}");
-                    }
-                    else
-                    {
-                        var paramName = $"@p{paramCounter++}";
-                        whereClauses.Add($"{column} {operatorClause} {paramName}");
-                        parameters.Add(CreateTypedParameter(paramName, filter.Value));
-                    }
-                }
-            }
-
-            // 2. Procesar grupos AND (nueva funcionalidad)
-            var andGroups = new List<string>();
+            // Solo procesar FiltrosAnd (según tu JSON de ejemplo)
+            // IMPORTANTE: Si usas FiltrosAnd, NO proceses también Filtros
             if (request.FiltrosAnd?.Any() == true)
             {
-                foreach (var grupo in request.FiltrosAnd.Take(5))
+                var allAndClauses = new List<string>();
+
+                foreach (var grupo in request.FiltrosAnd)
                 {
                     if (grupo.Filtros?.Any() != true) continue;
 
@@ -464,16 +413,31 @@ namespace MyApiProject.Controllers
                     foreach (var filter in grupo.Filtros
                         .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
                                !string.IsNullOrWhiteSpace(f.Value))
-                        .Take(8))
+                        )
                     {
                         totalFilters++;
                         string operatorClause = GetOperatorClause(filter.Operator);
                         string column = FormatFilterColumn(filter.Key);
 
-                        // ... (código para procesar cada filtro)
+                        // Procesar operador IN/NOT IN CORRECTAMENTE
+                        if (operatorClause == "IN" || operatorClause == "NOT IN")
+                        {
+                            var tempWhere = new List<string>();
+                            var tempParams = new List<SqlParameter>();
+                            int tempParamCounter = grupoParamCounter;
 
-                        // Manejar operadores especiales
-                        if (operatorClause == "LIKE")
+                            HandleInOperatorOptimized(filter, column, operatorClause,
+                                tempWhere, tempParams, ref tempParamCounter);
+
+                            if (tempWhere.Any())
+                            {
+                                // IMPORTANTE: Solo agregar UNA cláusula IN
+                                grupoClauses.Add(tempWhere[0]);
+                                grupoParams.AddRange(tempParams);
+                                grupoParamCounter = tempParamCounter;
+                            }
+                        }
+                        else if (operatorClause == "LIKE")
                         {
                             var paramName = $"@p{grupoParamCounter++}";
                             grupoClauses.Add($"{column} LIKE {paramName}");
@@ -487,68 +451,25 @@ namespace MyApiProject.Controllers
                                 grupoParams.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
                             }
                         }
-                        else
+                        else if (operatorClause == "BETWEEN")
                         {
-                            var paramName = $"@p{grupoParamCounter++}";
-                            grupoClauses.Add($"{column} {operatorClause} {paramName}");
-                            grupoParams.Add(CreateTypedParameter(paramName, filter.Value));
-                        }
-                    }
+                            var tempWhere = new List<string>();
+                            var tempParams = new List<SqlParameter>();
+                            int tempParamCounter = grupoParamCounter;
 
-                    if (grupoClauses.Any())
-                    {
-                        if (grupoClauses.Count > 1)
-                        {
-                            // Los filtros dentro del grupo se combinan según OperadorLogico
-                            var operador = (grupo.OperadorLogico?.ToUpper() == "OR") ? " OR " : " AND ";
-                            andGroups.Add($"({string.Join(operador, grupoClauses)})");
-                        }
-                        else
-                        {
-                            andGroups.Add(grupoClauses[0]);
-                        }
-                        parameters.AddRange(grupoParams);
-                        paramCounter = grupoParamCounter;
-                    }
-                }
-            }
+                            HandleBetweenOperator(filter, column, tempWhere,
+                                tempParams, ref tempParamCounter);
 
-            // 3. Procesar grupos OR - estos se combinarán con OR con los grupos AND
-            var orGroups = new List<string>();
-            if (request.FiltrosOr?.Any() == true)
-            {
-                foreach (var grupo in request.FiltrosOr.Take(5))
-                {
-                    if (grupo.Filtros?.Any() != true) continue;
-
-                    var grupoClauses = new List<string>();
-                    var grupoParams = new List<SqlParameter>();
-                    int grupoParamCounter = paramCounter;
-
-                    foreach (var filter in grupo.Filtros
-                        .Where(f => !string.IsNullOrWhiteSpace(f.Key) &&
-                               !string.IsNullOrWhiteSpace(f.Value))
-                        .Take(8))
-                    {
-                        totalFilters++;
-                        string operatorClause = GetOperatorClause(filter.Operator);
-                        string column = FormatFilterColumn(filter.Key);
-
-                        // ... (código para procesar cada filtro)
-
-                        if (operatorClause == "LIKE")
-                        {
-                            var paramName = $"@p{grupoParamCounter++}";
-                            grupoClauses.Add($"{column} LIKE {paramName}");
-
-                            if (filter.Value.StartsWith("%") || filter.Value.EndsWith("%"))
+                            if (tempWhere.Any())
                             {
-                                grupoParams.Add(new SqlParameter(paramName, filter.Value));
+                                grupoClauses.Add(tempWhere[0]);
+                                grupoParams.AddRange(tempParams);
+                                grupoParamCounter = tempParamCounter;
                             }
-                            else
-                            {
-                                grupoParams.Add(new SqlParameter(paramName, $"%{filter.Value}%"));
-                            }
+                        }
+                        else if (operatorClause == "IS NULL" || operatorClause == "IS NOT NULL")
+                        {
+                            grupoClauses.Add($"{column} {operatorClause}");
                         }
                         else
                         {
@@ -563,64 +484,33 @@ namespace MyApiProject.Controllers
                         if (grupoClauses.Count > 1)
                         {
                             var operador = (grupo.OperadorLogico?.ToUpper() == "OR") ? " OR " : " AND ";
-                            orGroups.Add($"({string.Join(operador, grupoClauses)})");
+                            allAndClauses.Add($"({string.Join(operador, grupoClauses)})");
                         }
                         else
                         {
-                            orGroups.Add(grupoClauses[0]);
+                            allAndClauses.Add(grupoClauses[0]);
                         }
                         parameters.AddRange(grupoParams);
                         paramCounter = grupoParamCounter;
                     }
                 }
-            }
 
-            // 4. Combinar todos los grupos en la cláusula WHERE final
-            // Primero, combinar todos los grupos AND
-            if (andGroups.Any())
-            {
-                if (andGroups.Count > 1)
+                // Agregar todas las cláusulas AND juntas
+                if (allAndClauses.Any())
                 {
-                    whereClauses.Add($"({string.Join(" AND ", andGroups)})");
-                }
-                else
-                {
-                    whereClauses.Add(andGroups[0]);
-                }
-            }
-
-            // Luego, agregar los grupos OR
-            // La clave está aquí: si hay grupos OR, combinarlos con OR con la condición AND existente
-            if (orGroups.Any())
-            {
-                if (whereClauses.Any())
-                {
-                    // Si ya hay cláusulas AND, combinarlas con OR
-                    string combinedAnd = whereClauses[0];
-
-                    if (orGroups.Count > 1)
+                    if (allAndClauses.Count > 1)
                     {
-                        string combinedOr = $"({string.Join(" OR ", orGroups)})";
-                        whereClauses[0] = $"({combinedAnd} OR {combinedOr})";
+                        whereClauses.Add($"({string.Join(" AND ", allAndClauses)})");
                     }
                     else
                     {
-                        whereClauses[0] = $"({combinedAnd} OR {orGroups[0]})";
-                    }
-                }
-                else
-                {
-                    // Si no hay cláusulas AND, usar solo las OR
-                    if (orGroups.Count > 1)
-                    {
-                        whereClauses.Add($"({string.Join(" OR ", orGroups)})");
-                    }
-                    else
-                    {
-                        whereClauses.Add(orGroups[0]);
+                        whereClauses.Add(allAndClauses[0]);
                     }
                 }
             }
+
+            // NOTA: NO procesar Filtros si ya procesamos FiltrosAnd
+            // Esto previene la duplicación
 
             _logger.LogDebug("Construidos {Count} filtros con {ParamCount} parámetros",
                 totalFilters, parameters.Count);
@@ -1726,12 +1616,12 @@ namespace MyApiProject.Controllers
         #region Métodos de Filtrado Optimizados
 
         private void HandleInOperatorOptimized(
-            BusquedaParams filter,
-            string column,
-            string operatorClause,
-            List<string> whereClauses,
-            List<SqlParameter> parameters,
-            ref int paramCounter)
+                        BusquedaParams filter,
+                        string column,
+                        string operatorClause,
+                        List<string> whereClauses,
+                        List<SqlParameter> parameters,
+                        ref int paramCounter)
         {
             try
             {
@@ -1753,53 +1643,38 @@ namespace MyApiProject.Controllers
                     return;
                 }
 
-                // Para múltiples valores
+                // Para múltiples valores - CREAR PARÁMETROS SEPARADOS
                 var paramNames = new List<string>();
-                var paramValues = new List<object>();
-                var paramTypes = new HashSet<SqlDbType>();
 
                 foreach (var value in values)
                 {
                     var paramName = $"@p{paramCounter++}";
                     paramNames.Add(paramName);
-
-                    var typedParam = CreateTypedParameter(paramName, value);
-                    paramValues.Add(typedParam.Value);
-                    paramTypes.Add(typedParam.SqlDbType);
+                    parameters.Add(CreateTypedParameter(paramName, value));
                 }
 
-                // Si hay múltiples tipos, convertir todo a string
-                if (paramTypes.Count > 1)
-                {
-                    paramNames.Clear();
-                    paramValues.Clear();
-                    paramCounter -= values.Length;
-
-                    for (int i = 0; i < values.Length; i++)
-                    {
-                        var paramName = $"@p{paramCounter++}";
-                        paramNames.Add(paramName);
-                        paramValues.Add(values[i]);
-                    }
-                }
-
+                // Construir cláusula IN con múltiples parámetros
                 var inClause = $"{column} {operatorClause} ({string.Join(", ", paramNames)})";
                 whereClauses.Add(inClause);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error procesando operador IN para columna {Column}, usando igualdad simple", column);
 
-                for (int i = 0; i < paramNames.Count; i++)
+                // Fallback a igualdad simple con el primer valor
+                var values = filter.Value.Split(',')
+                    .Select(v => v.Trim())
+                    .FirstOrDefault(v => !string.IsNullOrEmpty(v));
+
+                if (!string.IsNullOrEmpty(values))
                 {
-                    parameters.Add(new SqlParameter(paramNames[i], paramValues[i]));
+                    var paramName = $"@p{paramCounter++}";
+                    var singleOperator = operatorClause == "IN" ? "=" : "<>";
+                    whereClauses.Add($"{column} {singleOperator} {paramName}");
+                    parameters.Add(CreateTypedParameter(paramName, values));
                 }
             }
-            catch
-            {
-                // Fallback a igualdad simple
-                var paramName = $"@p{paramCounter++}";
-                whereClauses.Add($"{column} = {paramName}");
-                parameters.Add(new SqlParameter(paramName, filter.Value));
-            }
         }
-
         private void HandleBetweenOperator(
             BusquedaParams filter,
             string column,

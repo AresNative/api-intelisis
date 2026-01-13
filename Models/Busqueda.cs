@@ -1,3 +1,5 @@
+using Newtonsoft.Json.Linq;
+
 namespace MyApiProject.Models
 {
     public class BusquedaParams
@@ -42,5 +44,10 @@ namespace MyApiProject.Models
         // Nuevas propiedades para filtros avanzados
         public List<FiltroGrupo> FiltrosAnd { get; set; } = new(); // Grupos que se unen con AND
         public List<FiltroGrupo> FiltrosOr { get; set; } = new();  // Grupos que se unen con OR
+    }
+    public class ActualizarRequest
+    {
+        public JObject Data { get; set; }
+        public FiltrosRequest Filtros { get; set; }
     }
 }

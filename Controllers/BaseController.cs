@@ -783,7 +783,43 @@ namespace MyApiProject.Controllers
 
             return firstColumn;
         }
+
+        protected async Task<bool> TablaExiste(string nombreTabla)
+        {
+            string query = @"
+        SELECT COUNT(*) 
+        FROM INFORMATION_SCHEMA.TABLES 
+        WHERE TABLE_NAME = @NombreTabla";
+
+            await using var connection = await OpenConnectionAsync();
+            await using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@NombreTabla", nombreTabla);
+
+            var resultado = await command.ExecuteScalarAsync();
+            return Convert.ToInt32(resultado) > 0;
+        }
+
+        protected async Task<List<string>> ObtenerColumnasTabla(string nombreTabla)
+        {
+            var columnas = new List<string>();
+
+            string query = @"
+        SELECT COLUMN_NAME 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_NAME = @NombreTabla 
+        ORDER BY ORDINAL_POSITION";
+
+            await using var connection = await OpenConnectionAsync();
+            await using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@NombreTabla", nombreTabla);
+
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                columnas.Add(reader.GetString(0).ToLower());
+            }
+
+            return columnas;
+        }
     }
-
-
 }
