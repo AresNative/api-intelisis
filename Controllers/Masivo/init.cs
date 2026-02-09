@@ -182,6 +182,7 @@ namespace MyApiProject.Controllers
             var hasAggregations = false;
             var hasDistinct = false;
             var distinctColumns = new List<string>();
+            var hasCaseWhen = false;
 
             // 1. Procesar SELECTs normales (optimizado)
             if (request.Selects?.Any() == true)
@@ -189,6 +190,15 @@ namespace MyApiProject.Controllers
                 foreach (var select in request.Selects.Where(s => !string.IsNullOrWhiteSpace(s.Key)))
                 {
                     var column = FormatColumnName(select.Key);
+
+                    // Verificar si es una expresión CASE WHEN
+                    if (select.Key.Trim().StartsWith("CASE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasCaseWhen = true;
+                        var caseAlias = !string.IsNullOrWhiteSpace(select.Alias) ? $"AS [{select.Alias}]" : "";
+                        selectParts.Add($"{select.Key} {caseAlias}");
+                        continue;
+                    }
 
                     if (!string.IsNullOrWhiteSpace(select.Alias) &&
                         select.Alias != select.Key.Replace(".", "_"))
@@ -207,15 +217,13 @@ namespace MyApiProject.Controllers
                 }
             }
 
-            // 2. Procesar AGREGACIONES (optimizado)
+            // 2. Procesar AGREGACIONES con CASE WHEN
             if (request.Agregaciones?.Any() == true)
             {
-                // Verificar si hay agregaciones reales (COUNT, SUM, AVG, etc.)
                 hasAggregations = request.Agregaciones.Any(a =>
                     !string.IsNullOrWhiteSpace(a.Operation) &&
                     a.Operation.ToUpper() != "DISTINCT");
 
-                // Verificar si hay DISTINCT
                 hasDistinct = request.Agregaciones.Any(a =>
                     a.Operation?.ToUpper() == "DISTINCT");
 
@@ -224,7 +232,29 @@ namespace MyApiProject.Controllers
                     var operation = GetAggregationOperation(agg.Operation);
                     var columnExpression = FormatColumnExpression(agg.Key);
 
-                    // Manejar COUNT(DISTINCT ...)
+                    var aggAlias = !string.IsNullOrWhiteSpace(agg.Alias) ? $"AS [{agg.Alias}]" : "";
+                    // Verificar si es una agregación con CASE WHEN
+                    if (agg.Key.Trim().StartsWith("CASE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasCaseWhen = true;
+
+                        if (operation == "COUNT DISTINCT")
+                        {
+                            selectParts.Add($"COUNT(DISTINCT {agg.Key}) {aggAlias}");
+                        }
+                        else if (!string.IsNullOrEmpty(operation) && operation != "DISTINCT")
+                        {
+                            selectParts.Add($"{operation}({agg.Key}) {aggAlias}");
+                        }
+                        else
+                        {
+                            selectParts.Add($"{agg.Key} {aggAlias}");
+                        }
+
+                        hasAggregations = hasAggregations || (operation != "DISTINCT");
+                        continue;
+                    }
+
                     if (operation == "COUNT DISTINCT")
                     {
                         var distinctColumn = FormatColumnExpression(agg.Key);
@@ -254,10 +284,6 @@ namespace MyApiProject.Controllers
                         continue;
                     }
 
-                    // Otras funciones de agregación (COUNT, SUM, AVG, etc.)
-                    var aggAlias = !string.IsNullOrWhiteSpace(agg.Alias)
-                        ? $"AS [{agg.Alias}]"
-                        : "";
                     selectParts.Add($"{operation}({columnExpression}) {aggAlias}");
                     hasAggregations = true;
                 }
@@ -275,16 +301,14 @@ namespace MyApiProject.Controllers
             // 5. Aplicar DISTINCT a nivel de SELECT si hay DISTINCT
             if (hasDistinct && !hasAggregations)
             {
-                // Solo aplicar DISTINCT si no hay otras agregaciones
                 selectClause = $"DISTINCT {selectClause}";
             }
 
-            // 6. GROUP BY optimizado
+            // 6. GROUP BY optimizado - excluir columnas con CASE WHEN
             string groupByClause = "";
 
-            if (hasAggregations && groupByParts.Any())
+            if (hasAggregations && groupByParts.Any() && !hasCaseWhen)
             {
-                // Si hay agregaciones, usar GROUP BY con las columnas no agregadas
                 var validGroupByColumns = groupByParts
                     .Where(g => !IsComplexExpression(g))
                     .Distinct()
@@ -295,10 +319,8 @@ namespace MyApiProject.Controllers
                     groupByClause = $"GROUP BY {string.Join(", ", validGroupByColumns)}";
                 }
             }
-            else if (hasDistinct && !hasAggregations && distinctColumns.Any())
+            else if (hasDistinct && !hasAggregations && distinctColumns.Any() && !hasCaseWhen)
             {
-                // Para DISTINCT sin agregaciones, crear GROUP BY con todas las columnas DISTINCT
-                // Esto es equivalente a SELECT DISTINCT pero más eficiente en algunos casos
                 var validDistinctColumns = distinctColumns
                     .Where(g => !IsComplexExpression(g))
                     .Distinct()
@@ -306,10 +328,9 @@ namespace MyApiProject.Controllers
 
                 if (validDistinctColumns.Any())
                 {
-                    // Si hay columnas DISTINCT específicas, agrupar por ellas
                     groupByClause = $"GROUP BY {string.Join(", ", validDistinctColumns)}";
                 }
-                else if (selectClause.StartsWith("DISTINCT"))
+                /* else if (selectClause.StartsWith("DISTINCT"))
                 {
                     // Si es SELECT DISTINCT *, extraer las columnas reales de la consulta
                     var actualColumns = ExtractActualColumnsFromDistinct(selectClause);
@@ -317,11 +338,12 @@ namespace MyApiProject.Controllers
                     {
                         groupByClause = $"GROUP BY {string.Join(", ", actualColumns)}";
                     }
-                }
+                } */
             }
 
             return (selectClause, groupByClause);
         }
+
 
         // Método helper para extraer columnas de un SELECT DISTINCT
         private List<string> ExtractActualColumnsFromDistinct(string selectClause)
@@ -419,8 +441,41 @@ namespace MyApiProject.Controllers
                         string operatorClause = GetOperatorClause(filter.Operator);
                         string column = FormatFilterColumn(filter.Key);
 
-                        // Procesar operador IN/NOT IN CORRECTAMENTE
-                        if (operatorClause == "IN" || operatorClause == "NOT IN")
+                        // Manejar operador CASE_WHEN
+                        if (operatorClause == "CASE_WHEN")
+                        {
+                            var tempWhere = new List<string>();
+                            var tempParams = new List<SqlParameter>();
+                            int tempParamCounter = grupoParamCounter;
+
+                            HandleCaseWhenOperator(filter, tempWhere,
+                                tempParams, ref tempParamCounter);
+
+                            if (tempWhere.Any())
+                            {
+                                grupoClauses.Add(tempWhere[0]);
+                                grupoParams.AddRange(tempParams);
+                                grupoParamCounter = tempParamCounter;
+                            }
+                        }
+                        // Manejar operador TIME_BETWEEN
+                        else if (operatorClause == "TIME_BETWEEN")
+                        {
+                            var tempWhere = new List<string>();
+                            var tempParams = new List<SqlParameter>();
+                            int tempParamCounter = grupoParamCounter;
+
+                            HandleTimeBetweenOperator(filter, column, tempWhere,
+                                tempParams, ref tempParamCounter);
+
+                            if (tempWhere.Any())
+                            {
+                                grupoClauses.Add(tempWhere[0]);
+                                grupoParams.AddRange(tempParams);
+                                grupoParamCounter = tempParamCounter;
+                            }
+                        }
+                        else if (operatorClause == "IN" || operatorClause == "NOT IN")
                         {
                             var tempWhere = new List<string>();
                             var tempParams = new List<SqlParameter>();
@@ -457,8 +512,20 @@ namespace MyApiProject.Controllers
                             var tempParams = new List<SqlParameter>();
                             int tempParamCounter = grupoParamCounter;
 
-                            HandleBetweenOperator(filter, column, tempWhere,
-                                tempParams, ref tempParamCounter);
+                            // Determinar si es un filtro de tiempo basado en el nombre de la columna
+                            bool isTimeColumn = filter.Key.Contains("Hora", StringComparison.OrdinalIgnoreCase) ||
+                                               filter.Key.Contains("Time", StringComparison.OrdinalIgnoreCase);
+
+                            if (isTimeColumn)
+                            {
+                                HandleTimeBetweenOperator(filter, column, tempWhere,
+                                    tempParams, ref tempParamCounter);
+                            }
+                            else
+                            {
+                                HandleBetweenOperator(filter, column, tempWhere,
+                                    tempParams, ref tempParamCounter);
+                            }
 
                             if (tempWhere.Any())
                             {
@@ -508,9 +575,6 @@ namespace MyApiProject.Controllers
                     }
                 }
             }
-
-            // NOTA: NO procesar Filtros si ya procesamos FiltrosAnd
-            // Esto previene la duplicación
 
             _logger.LogDebug("Construidos {Count} filtros con {ParamCount} parámetros",
                 totalFilters, parameters.Count);
@@ -1387,6 +1451,13 @@ namespace MyApiProject.Controllers
                 return column;
             }
 
+            // Caso especial para filtros de tiempo (CAST a TIME)
+            if (column.Contains(".Hora") || column.EndsWith("Hora", StringComparison.OrdinalIgnoreCase))
+            {
+                // Si la columna contiene indicadores de hora, convertir a TIME
+                return FormatColumnName(column);
+            }
+
             return FormatColumnName(column);
         }
 
@@ -1437,6 +1508,8 @@ namespace MyApiProject.Controllers
 
             return operatorStr.ToUpper() switch
             {
+                "CASE_WHEN" => "CASE_WHEN", // Nuevo operador para CASE WHEN
+                "TIME_BETWEEN" => "TIME_BETWEEN",
                 "LIKE" => "LIKE",
                 ">=" => ">=",
                 "<=" => "<=",
@@ -1614,6 +1687,228 @@ namespace MyApiProject.Controllers
         #endregion
 
         #region Métodos de Filtrado Optimizados
+        private void HandleCaseWhenOperator(
+            BusquedaParams filter,
+            List<string> whereClauses,
+            List<SqlParameter> parameters,
+            ref int paramCounter)
+        {
+            try
+            {
+                // Parsear la expresión CASE WHEN
+                // Formato esperado: "WHEN condition1 THEN value1 WHEN condition2 THEN value2 ELSE default END"
+                var caseExpression = BuildCaseExpression(filter.Value, parameters, ref paramCounter);
+
+                if (!string.IsNullOrEmpty(caseExpression))
+                {
+                    // Determinar si es para WHERE o para SELECT
+                    if (!string.IsNullOrEmpty(filter.Key))
+                    {
+                        // Para filtros en WHERE
+                        whereClauses.Add($"{caseExpression} = 1");
+                    }
+                    else
+                    {
+                        // Para expresiones en SELECT (se manejará en otra parte)
+                        whereClauses.Add(caseExpression);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error procesando CASE WHEN para filtro: {Value}", filter.Value);
+
+                // Fallback: crear una expresión simple
+                whereClauses.Add("1 = 1");
+            }
+        }
+
+        private string BuildCaseExpression(string value, List<SqlParameter> parameters, ref int paramCounter)
+        {
+            // Formato JSON simplificado para CASE WHEN
+            // Ejemplo: 
+            // {
+            //   "when": [
+            //     { "condition": "edad >= 18", "then": "'Adulto'" },
+            //     { "condition": "edad < 18", "then": "'Menor'" }
+            //   ],
+            //   "else": "'Desconocido'"
+            // }
+
+            try
+            {
+                // Intentar parsear como JSON
+                var jsonDoc = JsonDocument.Parse(value);
+                var root = jsonDoc.RootElement;
+
+                var caseBuilder = new StringBuilder("CASE");
+
+                // Procesar condiciones WHEN
+                if (root.TryGetProperty("when", out var whenArray))
+                {
+                    foreach (var whenItem in whenArray.EnumerateArray())
+                    {
+                        if (whenItem.TryGetProperty("condition", out var condition) &&
+                            whenItem.TryGetProperty("then", out var thenValue))
+                        {
+                            // Parsear condición y reemplazar parámetros
+                            var parsedCondition = ParseCondition(condition.GetString(), parameters, ref paramCounter);
+                            var parsedThen = ParseValue(thenValue.GetString(), parameters, ref paramCounter);
+
+                            caseBuilder.Append($" WHEN {parsedCondition} THEN {parsedThen}");
+                        }
+                    }
+                }
+
+                // Procesar ELSE
+                if (root.TryGetProperty("else", out var elseValue))
+                {
+                    var parsedElse = ParseValue(elseValue.GetString(), parameters, ref paramCounter);
+                    caseBuilder.Append($" ELSE {parsedElse}");
+                }
+
+                caseBuilder.Append(" END");
+
+                return caseBuilder.ToString();
+            }
+            catch (JsonException)
+            {
+                // Si no es JSON, tratar como string directo
+                // Formato alternativo: "WHEN columna = valor THEN 'resultado' ELSE 'otro' END"
+                if (value.Trim().StartsWith("CASE", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Ya es una expresión CASE WHEN completa
+                    return value;
+                }
+
+                // Formato simplificado: "columna = valor:resultado;columna2 = valor2:resultado2;default"
+                return ParseSimpleCaseExpression(value, parameters, ref paramCounter);
+            }
+        }
+        private string ParseSimpleCaseExpression(string expression, List<SqlParameter> parameters, ref int paramCounter)
+        {
+            var caseBuilder = new StringBuilder("CASE");
+
+            // Formato: "columna = valor:resultado;columna2 = valor2:resultado2;default"
+            var parts = expression.Split(';', StringSplitOptions.RemoveEmptyEntries);
+
+            for (int i = 0; i < parts.Length; i++)
+            {
+                var part = parts[i].Trim();
+
+                // Si es el último y no contiene ':', es el ELSE
+                if (i == parts.Length - 1 && !part.Contains(':'))
+                {
+                    caseBuilder.Append($" ELSE {ParseValue(part, parameters, ref paramCounter)}");
+                }
+                else
+                {
+                    var conditionParts = part.Split(':', 2);
+                    if (conditionParts.Length == 2)
+                    {
+                        var condition = conditionParts[0].Trim();
+                        var result = conditionParts[1].Trim();
+
+                        // Parsear condición (puede contener operadores)
+                        var parsedCondition = ParseCondition(condition, parameters, ref paramCounter);
+                        var parsedResult = ParseValue(result, parameters, ref paramCounter);
+
+                        caseBuilder.Append($" WHEN {parsedCondition} THEN {parsedResult}");
+                    }
+                }
+            }
+
+            caseBuilder.Append(" END");
+            return caseBuilder.ToString();
+        }
+
+        private string ParseCondition(string condition, List<SqlParameter> parameters, ref int paramCounter)
+        {
+            if (string.IsNullOrEmpty(condition))
+                return "1 = 1";
+
+            // Detectar operadores en la condición
+            var operators = new[] { "=", "!=", "<>", ">", "<", ">=", "<=", "LIKE", "IN", "BETWEEN" };
+
+            foreach (var op in operators)
+            {
+                if (condition.Contains($" {op} "))
+                {
+                    var parts = condition.Split(new[] { $" {op} " }, 2, StringSplitOptions.None);
+                    if (parts.Length == 2)
+                    {
+                        var left = parts[0].Trim();
+                        var right = parts[1].Trim();
+
+                        // Verificar si el lado derecho necesita parámetro
+                        if (right.StartsWith("'") && right.EndsWith("'"))
+                        {
+                            // Es string literal
+                            return $"{left} {op} {right}";
+                        }
+                        else if (int.TryParse(right, out _) || decimal.TryParse(right, out _))
+                        {
+                            // Es número literal
+                            return $"{left} {op} {right}";
+                        }
+                        else if (right.Equals("NULL", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Es NULL
+                            return $"{left} {op} NULL";
+                        }
+                        else
+                        {
+                            // Necesita parámetro
+                            var paramName = $"@p{paramCounter++}";
+                            parameters.Add(CreateTypedParameter(paramName, right));
+                            return $"{left} {op} {paramName}";
+                        }
+                    }
+                }
+            }
+
+            // Si no se detectó operador, asumir igualdad con parámetro
+            var paramName2 = $"@p{paramCounter++}";
+            parameters.Add(CreateTypedParameter(paramName2, condition));
+            return $"{condition} = {paramName2}";
+        }
+
+        private string ParseValue(string value, List<SqlParameter> parameters, ref int paramCounter)
+        {
+            if (string.IsNullOrEmpty(value))
+                return "NULL";
+
+            value = value.Trim();
+
+            // Verificar si es string literal
+            if ((value.StartsWith("'") && value.EndsWith("'")) ||
+                (value.StartsWith("\"") && value.EndsWith("\"")))
+            {
+                return value;
+            }
+
+            // Verificar si es número
+            if (int.TryParse(value, out int intValue))
+            {
+                return intValue.ToString();
+            }
+
+            if (decimal.TryParse(value, out decimal decimalValue))
+            {
+                return decimalValue.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            // Verificar si es NULL
+            if (value.Equals("NULL", StringComparison.OrdinalIgnoreCase))
+            {
+                return "NULL";
+            }
+
+            // Es un valor que necesita parámetro
+            var paramName = $"@p{paramCounter++}";
+            parameters.Add(CreateTypedParameter(paramName, value));
+            return paramName;
+        }
 
         private void HandleInOperatorOptimized(
                         BusquedaParams filter,
@@ -1685,12 +1980,78 @@ namespace MyApiProject.Controllers
             var values = filter.Value.Split(new[] { " AND ", " and " }, StringSplitOptions.RemoveEmptyEntries);
             if (values.Length != 2) return;
 
+            // Determinar si es un filtro de tiempo
+            bool isTimeFilter = filter.Operator?.ToUpper() == "TIME_BETWEEN" ||
+                               filter.Key.Contains(".Hora") ||
+                               filter.Key.EndsWith("Hora", StringComparison.OrdinalIgnoreCase);
+
             var fromParam = $"@p{paramCounter++}";
             var toParam = $"@p{paramCounter++}";
 
-            whereClauses.Add($"{column} BETWEEN {fromParam} AND {toParam}");
-            parameters.Add(CreateTypedParameter(fromParam, values[0].Trim()));
-            parameters.Add(CreateTypedParameter(toParam, values[1].Trim()));
+            if (isTimeFilter)
+            {
+                // Usar CAST a TIME para filtro por horas
+                whereClauses.Add($"CAST({column} AS TIME) BETWEEN {fromParam} AND {toParam}");
+
+                // Asegurar que los valores sean tiempos válidos
+                parameters.Add(CreateTimeParameter(fromParam, values[0].Trim()));
+                parameters.Add(CreateTimeParameter(toParam, values[1].Trim()));
+            }
+            else
+            {
+                // Between normal
+                whereClauses.Add($"{column} BETWEEN {fromParam} AND {toParam}");
+                parameters.Add(CreateTypedParameter(fromParam, values[0].Trim()));
+                parameters.Add(CreateTypedParameter(toParam, values[1].Trim()));
+            }
+        }
+        private void HandleTimeBetweenOperator(
+            BusquedaParams filter,
+            string column,
+            List<string> whereClauses,
+            List<SqlParameter> parameters,
+            ref int paramCounter)
+        {
+            var values = filter.Value.Split(new[] { " AND ", " and " }, StringSplitOptions.RemoveEmptyEntries);
+            if (values.Length != 2) return;
+
+            var fromParam = $"@p{paramCounter++}";
+            var toParam = $"@p{paramCounter++}";
+
+            // Usar CAST a TIME
+            whereClauses.Add($"CAST({column} AS TIME) BETWEEN {fromParam} AND {toParam}");
+
+            parameters.Add(CreateTimeParameter(fromParam, values[0].Trim()));
+            parameters.Add(CreateTimeParameter(toParam, values[1].Trim()));
+        }
+
+        private SqlParameter CreateTimeParameter(string name, string value)
+        {
+            // Asegurar formato de tiempo correcto
+            if (TimeSpan.TryParse(value, out TimeSpan timeValue))
+            {
+                // Si es solo hora, convertir a TimeSpan
+                return new SqlParameter(name, SqlDbType.Time)
+                {
+                    Value = timeValue
+                };
+            }
+            else if (DateTime.TryParse(value, out DateTime dateTimeValue))
+            {
+                // Si es DateTime, extraer solo la parte de tiempo
+                return new SqlParameter(name, SqlDbType.Time)
+                {
+                    Value = dateTimeValue.TimeOfDay
+                };
+            }
+            else
+            {
+                // Valor por defecto si no se puede parsear
+                return new SqlParameter(name, SqlDbType.Time)
+                {
+                    Value = TimeSpan.Parse("00:00:00")
+                };
+            }
         }
 
         #endregion
