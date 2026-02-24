@@ -1358,10 +1358,10 @@ namespace MyApiProject.Controllers
         }
 
         private async Task<List<Dictionary<string, object>>> ExecuteOptimizedQuery(
-    SqlConnection connection,
-    string query,
-    List<SqlParameter> parameters,
-    int expectedPageSize)
+            SqlConnection connection,
+            string query,
+            List<SqlParameter> parameters,
+            int expectedPageSize)
         {
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
