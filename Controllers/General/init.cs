@@ -100,7 +100,7 @@ namespace MyApiProject.Controllers.general
         // ── POST: consultar con filtros paginados ─────────────────────────────
 
         [HttpPost("consultar")]
-        [ValidateToken]
+        /* [ValidateToken] */
         public async Task<IActionResult> ConsultarGeneral(
             [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] FiltrosRequest? request,
             [FromQuery] string fromClause = "")
@@ -122,11 +122,9 @@ namespace MyApiProject.Controllers.general
 
         [HttpPost("register")]
         [ValidateToken]
-        public async Task<IActionResult> Registrar(
-            [FromBody] JObject data,
-            [FromQuery] string table = "general")
+        public async Task<IActionResult> Registrar([FromBody] JObject data, [FromQuery] string? table = "general")
         {
-            if (data == null) return BadRequest(new { Message = "JSON inválido." });
+            if (data == null) return BadRequest(new { Message = "JSON inválido" });
 
             var validacion = await ValidarTablaYColumnaAsync(table);
             if (validacion != null) return validacion;
@@ -151,26 +149,90 @@ namespace MyApiProject.Controllers.general
                 var paramNames = string.Join(", ", properties.Select(p => $"@{p.Name}"));
 
                 var query = $@"
-                    INSERT INTO [{table}] ({columnNames})
-                    OUTPUT INSERTED.*
-                    VALUES ({paramNames})";
+            INSERT INTO {table} ({columnNames})
+            VALUES ({paramNames});";
 
                 await using var connection = await OpenConnectionAsync();
                 await using var command = new SqlCommand(query, connection);
 
-                foreach (var prop in properties)
-                    command.Parameters.AddWithValue($"@{prop.Name}", prop.Value?.ToObject<object>() ?? DBNull.Value);
+                foreach (var prop in data.Properties())
+                {
+                    var value = prop.Value?.ToObject<object>() ?? DBNull.Value;
+                    command.Parameters.AddWithValue("@" + prop.Name, value);
+                }
 
-                var insertedId = await command.ExecuteScalarAsync();
+                // Ejecutar el INSERT
+                var rowsAffected = await command.ExecuteNonQueryAsync();
 
-                _cache.Remove($"general_all_{table}");
-                await NotificarAsync("NuevoRegistro", new { Tabla = table, Accion = "Insert", Id = insertedId, Timestamp = DateTime.UtcNow });
+                // Construir el objeto de respuesta con los datos insertados
+                var insertedData = new Dictionary<string, object>();
+                foreach (var prop in data.Properties())
+                {
+                    var value = prop.Value?.ToObject<object>();
+                    insertedData[prop.Name] = value;
+                }
 
-                return Ok(new { Message = "Registro exitoso.", Id = insertedId });
+                // Intentar obtener valores generados por la base de datos (si los hay)
+                try
+                {
+                    // Intentar obtener SCOPE_IDENTITY() por si hay columna identidad
+                    command.CommandText = "SELECT CAST(SCOPE_IDENTITY() AS BIGINT)";
+                    var identityValue = await command.ExecuteScalarAsync();
+
+                    if (identityValue != null && identityValue != DBNull.Value)
+                    {
+                        // Buscar el nombre de la columna identidad
+                        command.CommandText = $@"
+                    SELECT COLUMN_NAME 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME = @TableName 
+                    AND COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') = 1";
+                        command.Parameters.Clear();
+                        command.Parameters.AddWithValue("@TableName", table);
+
+                        var identityColumn = await command.ExecuteScalarAsync() as string;
+                        if (!string.IsNullOrEmpty(identityColumn))
+                        {
+                            insertedData[identityColumn] = Convert.ToInt64(identityValue);
+                        }
+                        else
+                        {
+                            insertedData["Id"] = Convert.ToInt64(identityValue);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Si falla, simplemente continuamos sin el valor identidad
+                }
+
+                await NotificarAsync("NuevoRegistro", new
+                {
+                    Tabla = table,
+                    Accion = "Insert",
+                    Data = insertedData,
+                    RowsAffected = rowsAffected,
+                    Timestamp = DateTime.UtcNow
+                });
+
+                return Ok(new
+                {
+                    Message = "Registro exitoso.",
+                    Data = insertedData,
+                    RowsAffected = rowsAffected
+                });
+            }
+            catch (SqlException sqlEx)
+            {
+                return StatusCode(500, new
+                {
+                    Message = "Error de base de datos",
+                    Details = sqlEx.Message,
+                    ErrorNumber = sqlEx.Number,
+                });
             }
             catch (Exception ex) { return HandleException(ex, $"Registrar tabla={table}"); }
         }
-
         // ── PUT: actualizar ───────────────────────────────────────────────────
 
         [HttpPut("update/{tabla}")]
