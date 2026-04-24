@@ -8,17 +8,6 @@ using Newtonsoft.Json;
 
 namespace MyApiProject.Controllers
 {
-    /// <summary>
-    /// Controlador base con utilidades genéricas reutilizables en cualquier endpoint.
-    /// No contiene lógica de negocio específica.
-    ///
-    /// Provee:
-    ///   • Conexión SQL con timeout configurable
-    ///   • Manejo centralizado de errores
-    ///   • INSERT y UPDATE genéricos por reflexión
-    ///   • ExecuteMassiveQueryAsync — consulta paginada multi-estrategia
-    ///   • Utilidades de schema (TablaExiste, ObtenerColumnas, GuardarArchivo)
-    /// </summary>
     public abstract class BaseController : ControllerBase
     {
         private readonly string _connectionString;
